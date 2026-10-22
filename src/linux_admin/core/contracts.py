@@ -21,4 +21,9 @@ class Tool(Protocol):
     def execute(self, **kwargs: Any) -> ToolResult:
         """Thực hiện một tác vụ và trả về kết quả chuẩn hóa."""
         ...
-
+@dataclass
+class ActionRequest:
+    """Hành động agent đề xuất, Executor sẽ kiểm tra policy/approval."""
+    action_type: str
+    target: str
+    parameters: dict[str, Any] = field(default_factory=dict)
