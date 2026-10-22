@@ -1,0 +1,25 @@
+policy:
+  default_decision: deny
+  require_approval_for_disruptive_actions: true
+  allow_privilege_escalation: false
+
+actions:
+  inspect_system:
+    allowed: true
+    requires_approval: false
+
+  read_service_logs:
+    allowed: true
+    requires_approval: false
+
+  restart_service:
+    allowed: false
+    requires_approval: true
+
+  clean_package_cache:
+    allowed: false
+    requires_approval: true
+
+  delete_files:
+    allowed: false
+    requires_approval: true

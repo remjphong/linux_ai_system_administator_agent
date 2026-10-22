@@ -1,0 +1,14 @@
+app:
+  name: linux-admin-agent
+  version: "0.1.0"
+  environment: development
+
+agent:
+  mode: observe
+  dry_run: true
+  max_steps: 5
+
+logging:
+  level: INFO
+  audit_enabled: true
+  audit_database: data/audit.db
