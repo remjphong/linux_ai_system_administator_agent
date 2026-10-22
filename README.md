@@ -18,7 +18,7 @@ are implemented. Automated tests cover registry behavior.
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.10+
 - Linux environment recommended for integration testing.
 
 ## Setup
