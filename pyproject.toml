@@ -1,4 +1,3 @@
-
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
@@ -6,18 +5,19 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "linux-admin-agent"
 version = "0.1.0"
-description = "A safety-first AI agent for Linux system administration"
+description = "A safety-first agent for Linux system observation and controlled administration"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "psutil>=5.9",
-    "PyYAML>=6.0",
+    "psutil>=5.9,<8",
+    "PyYAML>=6.0,<7",
+    "python-dotenv>=1.0,<2",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
-    "ruff>=0.6",
+    "pytest>=8.0,<10",
+    "ruff>=0.6,<1",
 ]
 
 [project.scripts]
@@ -29,8 +29,8 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+addopts = "-ra"
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
-
+target-version = "py310"

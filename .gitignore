@@ -1,27 +1,27 @@
-
+cat > .gitignore <<'EOF'
 # Python
 __pycache__/
 *.py[cod]
 *.egg-info/
-dist/
 build/
+dist/
 
 # Virtual environment
 .venv/
 venv/
 
-# Test and lint cache
+# Test and lint caches
 .pytest_cache/
 .ruff_cache/
 .coverage
 htmlcov/
 
-# Secrets and local configuration
+# Secrets
 .env
 .env.*
 !.env.example
 
-# Runtime data and logs
+# Runtime files
 *.db
 *.sqlite3
 *.log
@@ -33,4 +33,4 @@ data/
 .idea/
 .DS_Store
 Thumbs.db
-
+EOF

@@ -1,38 +1,59 @@
+"""Command-line entry point for the Linux Admin Agent."""
+
+from __future__ import annotations
 
 import argparse
-import platform
+import sys
 
-import psutil
+from linux_admin import __version__
+from linux_admin.config import ConfigurationError, load_config
 
-from linux_admin.tools.registry import ToolRegistry
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="linux-admin",
+        description="Safety-first Linux system administration agent",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"linux-admin-agent {__version__}"
+    )
+    parser.add_argument(
+        "--check-config",
+        action="store_true",
+        help="Load and validate YAML configuration, then exit",
+    )
+    return parser
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Linux AI Agent System Administrator"
-    )
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="Check basic system metrics and registered tools",
-    )
+    parser = build_parser()
     args = parser.parse_args()
 
-    registry = ToolRegistry()
+    if not args.check_config:
+        parser.print_help()
+        return 0
 
-    print("Linux Admin Agent")
-    print(f"Operating system: {platform.system()}")
-    print(f"Python: {platform.python_version()}")
-    print(f"CPU usage: {psutil.cpu_percent(interval=0.2)}%")
-    print(f"Memory usage: {psutil.virtual_memory().percent}%")
-    print(f"Registered tools: {registry.list_tools()}")
+    try:
+        config = load_config()
+    except ConfigurationError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 2
 
-    if args.check:
-        print("Basic system check completed.")
-
+    print(f"Application: {config.name} {config.version}")
+    print(f"Project root: {config.project_root}")
+    print(f"Agent mode: {config.agent.mode}")
+    print(f"Dry-run: {config.agent.dry_run}")
+    print(f"Maximum steps: {config.agent.max_steps}")
+    print(f"Tool timeout: {config.agent.tool_timeout_seconds:g}s")
+    print(f"LLM enabled: {config.llm.enabled}")
+    print(f"Policy actions loaded: {len(config.policy.actions)}")
+    print(f"Service allowlist entries: {len(config.services.allowlist)}")
+    print(f"Service restart enabled: {config.services.restart_enabled}")
+    print(f"Audit enabled: {config.audit.enabled}")
+    print(f"Audit database: {config.audit.database_path}")
+    print("Configuration check passed.")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
