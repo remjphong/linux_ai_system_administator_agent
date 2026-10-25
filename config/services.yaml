@@ -1,11 +1,10 @@
-# Allowlist service được phép kiểm tra/restart trong beta
-allowed_services:
-  - "nginx"
-  - "test-app"
-  - "ssh"
+services:
+  allowlist:
+    - "demo-web.service"
+    - "test-app"
+    - "nginx"
+    - "ssh"
 
-# Service duy nhất được phép restart thật trong beta
-test_service_for_restart: "test-app"
+  restart_enabled: false
 
-# Timeout (giây) cho các lệnh systemctl
-systemctl_timeout: 30
+  systemctl_timeout: 30
