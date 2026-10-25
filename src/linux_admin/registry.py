@@ -7,7 +7,8 @@ application code can be invoked, and every invocation receives validated args.
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from linux_admin.contracts import (
     ActionRequest,

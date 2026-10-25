@@ -3,22 +3,37 @@ app:
   version: "0.1.0"
 
 agent:
-  # Supported values in the starter foundation: observe, assisted
+  # Supported modes: observe, assisted. Keep observe/dry_run enabled while testing.
   mode: observe
-  # Keep enabled until policy, approval, executor, and verification are tested.
   dry_run: true
   max_steps: 5
   tool_timeout_seconds: 10
 
+network:
+  # Optional external probe for generic Internet-connectivity investigations.
+  # Set to null or remove this setting to inspect local network state only.
+  connectivity_check_url: https://example.com/
+
 llm:
-  # Windows developers and Ubuntu developers can work without an API key.
   enabled: false
-  provider: null
+  provider: openai_compatible
   model: null
-  # If LLM is enabled later, the real key is read from this environment variable.
+  base_url: http://127.0.0.1:11434/v1
   api_key_env: LLM_API_KEY
+  timeout_seconds: 60
+  max_output_tokens: 160
+  planning_mode: rules
+  summary_enabled: false
+  fallback_to_rules: true
+
+tavily:
+  # Optional web search tool. Enable this after adding TAVILY_API_KEY to .env.
+  enabled: false
+  api_key_env: TAVILY_API_KEY
+  timeout_seconds: 8
+  max_results: 3
+  search_depth: basic
 
 audit:
   enabled: true
-  # Relative paths are resolved from the project root on Windows and Linux.
   database_path: data/audit.db

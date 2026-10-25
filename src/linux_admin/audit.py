@@ -8,12 +8,13 @@ caller can stop a controlled action rather than silently proceed.
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import threading
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from types import TracebackType
+from typing import Any
 
 
 class AuditError(RuntimeError):
@@ -203,8 +204,13 @@ class AuditLogger:
         with self._lock:
             self._connection.close()
 
-    def __enter__(self) -> "AuditLogger":
+    def __enter__(self) -> AuditLogger:  # noqa: PYI034
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.close()

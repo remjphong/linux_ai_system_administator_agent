@@ -1,7 +1,7 @@
 """Load and validate shared YAML configuration.
 
-Configuration errors fail startup. Secrets are read from environment variables
-and are deliberately excluded from normal summaries and dataclass repr output.
+Secrets are read from environment variables (normally from a local .env file) and
+are excluded from dataclass representations and routine configuration summaries.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 from dotenv import load_dotenv
@@ -25,6 +26,7 @@ class AgentSettings:
     dry_run: bool
     max_steps: int
     tool_timeout_seconds: float
+    connectivity_check_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,22 @@ class LLMSettings:
     model: str | None
     api_key_env: str
     api_key: str | None = field(default=None, repr=False)
+    base_url: str = "http://127.0.0.1:11434/v1"
+    timeout_seconds: float = 20.0
+    max_output_tokens: int = 1200
+    fallback_to_rules: bool = True
+    planning_mode: str = "rules"
+    summary_enabled: bool = False
+
+
+@dataclass(frozen=True)
+class TavilySettings:
+    enabled: bool
+    api_key_env: str
+    api_key: str | None = field(default=None, repr=False)
+    timeout_seconds: float = 8.0
+    max_results: int = 3
+    search_depth: str = "basic"
 
 
 @dataclass(frozen=True)
@@ -68,6 +86,7 @@ class AppConfig:
     version: str
     agent: AgentSettings
     llm: LLMSettings
+    tavily: TavilySettings
     audit: AuditSettings
     policy: PolicySettings
     services: ServiceSettings
@@ -115,6 +134,18 @@ def _boolean(value: Any, label: str) -> bool:
     return value
 
 
+def _env_boolean(name: str, fallback: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return fallback
+    normalized = raw.strip().casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"Environment variable {name} must be true or false")
+
+
 def _integer(value: Any, label: str, minimum: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ConfigurationError(f"{label} must be an integer")
@@ -123,20 +154,30 @@ def _integer(value: Any, label: str, minimum: int, maximum: int) -> int:
     return value
 
 
+def _number(value: Any, label: str, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigurationError(f"{label} must be a number")
+    numeric = float(value)
+    if not minimum <= numeric <= maximum:
+        raise ConfigurationError(f"{label} must be between {minimum:g} and {maximum:g}")
+    return numeric
+
+
+def _is_loopback_url(base_url: str) -> bool:
+    host = (urlsplit(base_url).hostname or "").casefold()
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
 def load_config(
     config_dir: str | Path | None = None,
     *,
     project_root: str | Path | None = None,
     dotenv_path: str | Path | None = None,
 ) -> AppConfig:
-    """Load the three shared YAML files and validate cross-file assumptions.
+    """Load YAML, then apply supported environment overrides.
 
-    Args:
-        config_dir: Directory containing agent.yaml, policy.yaml, services.yaml.
-            Defaults to `<project-root>/config`.
-        project_root: Root used to resolve relative runtime paths. If omitted,
-            the root is inferred from this source file or from config_dir.
-        dotenv_path: Optional explicit .env file. Defaults to `<project-root>/.env`.
+    ``LLM_API_KEY`` belongs to the selected model provider. ``TAVILY_API_KEY`` is
+    separate and is used only for Tavily web search; Tavily is not a chat LLM API.
     """
     default_root = Path(__file__).resolve().parents[2]
     if project_root is not None:
@@ -165,7 +206,13 @@ def load_config(
 
     app_section = _mapping(agent_file, "app", "agent.yaml")
     runtime_section = _mapping(agent_file, "agent", "agent.yaml")
+    network_section = agent_file.get("network", {})
+    if not isinstance(network_section, dict):
+        raise ConfigurationError("'network' in agent.yaml must be a mapping")
     llm_section = _mapping(agent_file, "llm", "agent.yaml")
+    tavily_section = agent_file.get("tavily", {})
+    if not isinstance(tavily_section, dict):
+        raise ConfigurationError("'tavily' in agent.yaml must be a mapping")
     audit_section = _mapping(agent_file, "audit", "agent.yaml")
 
     app_name = _string(_required(app_section, "name", "agent.yaml"), "app.name")
@@ -185,32 +232,152 @@ def load_config(
         1,
         50,
     )
-    timeout_value = _required(runtime_section, "tool_timeout_seconds", "agent.yaml")
-    if isinstance(timeout_value, bool) or not isinstance(timeout_value, (int, float)):
-        raise ConfigurationError("agent.tool_timeout_seconds must be a number")
-    timeout = float(timeout_value)
-    if not 0 < timeout <= 120:
-        raise ConfigurationError("agent.tool_timeout_seconds must be > 0 and <= 120")
+    timeout = _number(
+        _required(runtime_section, "tool_timeout_seconds", "agent.yaml"),
+        "agent.tool_timeout_seconds",
+        0.1,
+        120,
+    )
 
-    llm_enabled = _boolean(
+    # Optional HTTPS probe used for generic Internet-connectivity requests.
+    probe_value = (
+        os.getenv("NETWORK_CONNECTIVITY_CHECK_URL")
+        or network_section.get("connectivity_check_url")
+    )
+    connectivity_check_url = None
+    if probe_value is not None:
+        connectivity_check_url = _string(
+            probe_value, "network.connectivity_check_url"
+        )
+        parsed_probe = urlsplit(connectivity_check_url)
+        if (
+            parsed_probe.scheme != "https"
+            or not parsed_probe.hostname
+            or parsed_probe.username
+            or parsed_probe.password
+            or parsed_probe.fragment
+        ):
+            raise ConfigurationError(
+                "network.connectivity_check_url must be a clean HTTPS URL "
+                "without credentials or a fragment"
+            )
+        try:
+            _ = parsed_probe.port
+        except ValueError as exc:
+            raise ConfigurationError(
+                "network.connectivity_check_url contains an invalid port"
+            ) from exc
+
+    # LLM: use an OpenAI-compatible chat completions endpoint. The API key is never
+    # read from YAML; it is read from the configured environment variable.
+    llm_enabled_yaml = _boolean(
         _required(llm_section, "enabled", "agent.yaml"), "llm.enabled"
     )
-    provider_value = llm_section.get("provider")
-    model_value = llm_section.get("model")
+    llm_enabled = _env_boolean("LLM_ENABLED", llm_enabled_yaml)
+    provider_value = os.getenv("LLM_PROVIDER") or llm_section.get("provider")
+    model_value = os.getenv("LLM_MODEL") or llm_section.get("model")
     provider = (
         None
         if provider_value is None
         else _string(provider_value, "llm.provider")
     )
     model = None if model_value is None else _string(model_value, "llm.model")
+    if provider is not None:
+        provider = provider.casefold().replace("-", "_")
+        if provider == "openai":
+            provider = "openai_compatible"
     api_key_env = _string(
         llm_section.get("api_key_env", "LLM_API_KEY"), "llm.api_key_env"
     )
     api_key = os.getenv(api_key_env)
-    if llm_enabled and (not provider or not model or not api_key):
+    base_url_value = (
+        os.getenv("LLM_BASE_URL")
+        or llm_section.get("base_url", "https://api.openai.com/v1")
+    )
+    base_url = _string(base_url_value, "llm.base_url").rstrip("/")
+    parsed_base_url = urlsplit(base_url)
+    if (
+        parsed_base_url.scheme not in {"https", "http"}
+        or not parsed_base_url.netloc
+        or parsed_base_url.username
+        or parsed_base_url.password
+        or parsed_base_url.query
+        or parsed_base_url.fragment
+    ):
+        raise ConfigurationError("llm.base_url must be a clean HTTP(S) API root URL")
+    if parsed_base_url.scheme != "https" and not _is_loopback_url(base_url):
         raise ConfigurationError(
-            "llm.enabled is true but provider, model, or API key is missing; "
-            "configure agent.yaml and the named environment variable"
+            "Remote LLM endpoints must use HTTPS; HTTP is allowed only on loopback"
+        )
+    llm_timeout = _number(
+        llm_section.get("timeout_seconds", 20), "llm.timeout_seconds", 1, 60
+    )
+    max_output_tokens = _integer(
+        llm_section.get("max_output_tokens", 1200),
+        "llm.max_output_tokens",
+        128,
+        8192,
+    )
+    fallback_to_rules = _boolean(
+        llm_section.get("fallback_to_rules", True), "llm.fallback_to_rules"
+    )
+    planning_mode_value = (
+        os.getenv("LLM_PLANNING_MODE")
+        or llm_section.get("planning_mode", "rules")
+    )
+    planning_mode = _string(
+        planning_mode_value, "llm.planning_mode"
+    ).casefold()
+    if planning_mode not in {"rules", "llm"}:
+        raise ConfigurationError("llm.planning_mode must be 'rules' or 'llm'")
+    summary_enabled = _boolean(
+        llm_section.get("summary_enabled", False), "llm.summary_enabled"
+    )
+    if llm_enabled:
+        if provider != "openai_compatible":
+            raise ConfigurationError(
+                "LLM is enabled but llm.provider is unsupported; "
+                "use 'openai_compatible'"
+            )
+        if not model:
+            raise ConfigurationError(
+                "LLM is enabled but no model is configured; set LLM_MODEL"
+            )
+        if not api_key and not _is_loopback_url(base_url):
+            raise ConfigurationError(
+                f"LLM is enabled but {api_key_env} is missing; "
+                "configure the model provider key"
+            )
+
+    # Tavily is a separate web-search service. It enriches the agent with sources,
+    # but it does not replace the LLM planning and synthesis endpoint.
+    tavily_enabled_default = _boolean(
+        tavily_section.get("enabled", False), "tavily.enabled"
+    )
+    tavily_enabled = _env_boolean("TAVILY_ENABLED", tavily_enabled_default)
+    tavily_api_key_env = _string(
+        tavily_section.get("api_key_env", "TAVILY_API_KEY"),
+        "tavily.api_key_env",
+    )
+    tavily_api_key = os.getenv(tavily_api_key_env)
+    tavily_timeout = _number(
+        tavily_section.get("timeout_seconds", 8),
+        "tavily.timeout_seconds",
+        1,
+        30,
+    )
+    tavily_max_results = _integer(
+        tavily_section.get("max_results", 3), "tavily.max_results", 1, 5
+    )
+    tavily_search_depth = _string(
+        tavily_section.get("search_depth", "basic"), "tavily.search_depth"
+    )
+    if tavily_search_depth not in {"basic", "advanced"}:
+        raise ConfigurationError("tavily.search_depth must be 'basic' or 'advanced'")
+    if tavily_enabled and not tavily_api_key:
+        raise ConfigurationError(
+            f"Tavily search is enabled but {tavily_api_key_env} is missing; "
+            "put the key in .env"
         )
 
     audit_enabled = _boolean(
@@ -250,7 +417,9 @@ def load_config(
         if not isinstance(action_name, str) or not action_name.strip():
             raise ConfigurationError("Policy action names must be non-empty strings")
         if not isinstance(raw_rule, dict):
-            raise ConfigurationError(f"Policy action '{action_name}' must be a mapping")
+            raise ConfigurationError(
+                f"Policy action '{action_name}' must be a mapping"
+            )
         parsed_actions[action_name] = ActionPolicy(
             allowed=_boolean(
                 _required(raw_rule, "allowed", "policy.yaml"),
@@ -300,6 +469,7 @@ def load_config(
             dry_run=dry_run,
             max_steps=max_steps,
             tool_timeout_seconds=timeout,
+            connectivity_check_url=connectivity_check_url,
         ),
         llm=LLMSettings(
             enabled=llm_enabled,
@@ -307,6 +477,20 @@ def load_config(
             model=model,
             api_key_env=api_key_env,
             api_key=api_key,
+            base_url=base_url,
+            timeout_seconds=llm_timeout,
+            max_output_tokens=max_output_tokens,
+            fallback_to_rules=fallback_to_rules,
+            planning_mode=planning_mode,
+            summary_enabled=summary_enabled,
+        ),
+        tavily=TavilySettings(
+            enabled=tavily_enabled,
+            api_key_env=tavily_api_key_env,
+            api_key=tavily_api_key,
+            timeout_seconds=tavily_timeout,
+            max_results=tavily_max_results,
+            search_depth=tavily_search_depth,
         ),
         audit=AuditSettings(enabled=audit_enabled, database_path=database_path),
         policy=PolicySettings(

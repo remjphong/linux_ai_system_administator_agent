@@ -8,13 +8,21 @@ policy and approval checks have been implemented and tested.
 
 from __future__ import annotations
 
+import json
 import re
-from typing import Protocol, Sequence
+from collections.abc import Sequence
+from typing import Protocol
 from urllib.parse import urlsplit
 
 from linux_admin.config import AppConfig
 from linux_admin.contracts import IncidentContext, ToolResult, ToolSpec
-from linux_admin.llm_client import AgentPlan, PlanStep
+from linux_admin.diagnostics import diagnose_incident
+from linux_admin.llm_client import (
+    AgentPlan,
+    LLMClient,
+    OpenAICompatibleLLMClient,
+    PlanStep,
+)
 from linux_admin.registry import ToolRegistry
 
 
@@ -43,7 +51,7 @@ class Planner(Protocol):
 
 
 class RuleBasedPlanner:
-    """Plan the three beta incidents without depending on an LLM or network."""
+    """Select bounded, read-only probes for common Linux incidents."""
 
     def __init__(self, config: AppConfig) -> None:
         self._config = config
@@ -53,73 +61,291 @@ class RuleBasedPlanner:
         user_request: str,
         available_tools: Sequence[ToolSpec],
     ) -> AgentPlan:
-        request = user_request.casefold()
-        available = {spec.name for spec in available_tools if not spec.changes_system}
-        service_name = self._service_name_from_request(user_request)
-        url = self._url_from_request(user_request) or "http://127.0.0.1:8080/health"
-        parsed_url = urlsplit(url)
-        host = parsed_url.hostname or "127.0.0.1"
-        try:
-            port = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
-        except ValueError:
-            port = 80
+        request = self._normalize_request(user_request)
+        available = {
+            spec.name for spec in available_tools if not spec.changes_system
+        }
+        service_name = self._explicit_service_name_from_request(user_request)
+        url = self._url_from_request(user_request)
 
-        if self._looks_like_disk_pressure(request):
-            candidates = [
-                PlanStep("get_disk_usage", {"path": "/"}, "Measure filesystem usage"),
-                PlanStep("get_system_overview", {}, "Collect system-level context"),
-                PlanStep("list_top_processes", {"limit": 5}, "Inspect top processes"),
-            ]
-            rationale = "Disk-pressure triage: measure usage, then gather context."
-        elif self._looks_like_unreachable(request):
-            candidates = [
-                PlanStep(
-                    "check_tcp_connectivity",
-                    {"host": host, "port": port},
-                    "Check transport-level reachability",
-                ),
-                PlanStep(
-                    "check_http_endpoint",
-                    {"url": url},
-                    "Check application-level HTTP response",
-                ),
-                PlanStep(
-                    "get_service_status",
-                    {"service_name": service_name},
-                    "Check the likely backing service",
-                ),
-                PlanStep(
-                    "get_service_logs",
-                    {"service_name": service_name},
-                    "Collect diagnostic logs",
-                ),
-            ]
-            rationale = "Endpoint triage: compare TCP, HTTP, service, and log evidence."
+        candidates: list[PlanStep] = []
+        selected: set[str] = set()
+
+        def add(name: str, arguments: dict, reason: str) -> None:
+            if name in available and name not in selected:
+                candidates.append(PlanStep(name, arguments, reason))
+                selected.add(name)
+
+        disk_issue = self._looks_like_disk_pressure(request)
+        resource_issue = self._contains_any(
+            request,
+            (
+                "cpu", "processor", "memory", "ram", "swap",
+                "performance", "system health", "system overview",
+                "resource usage", "top processes", "processes",
+                "slow", "sluggish", "lag", "laggy", "running slowly",
+                "system slowdown", "hieu nang", "bo nho",
+                "tai nguyen he thong", "cham", "chay cham",
+                "may cham", "may chay cham", "do", "giat",
+                "ngon ram", "cpu cao", "ram cao",
+            ),
+        )
+        security_issue = self._contains_any(
+            request,
+            (
+                "security", "permission", "privilege", "authentication",
+                "unauthorized", "firewall", "access denied", "bao mat",
+                "quyen truy cap", "xac thuc", "dang nhap",
+                "tu choi truy cap",
+            ),
+        )
+        network_issue = self._contains_any(
+            request,
+            (
+                "network", "internet", "wifi", "dns", "gateway",
+                "network interface", "ip address", "packet loss",
+                "mang internet", "ket noi mang", "mang may tinh",
+                "mat ket noi", "dia chi ip", "khong co mang",
+            ),
+        )
+        # An explicit user URL has priority. For a general network check,
+        # use only the administrator-configured HTTPS probe, if present.
+        if not url and network_issue:
+            url = self._config.agent.connectivity_check_url
+
+        service_issue = bool(service_name) or self._contains_any(
+            request,
+            (
+                "service", "systemd", "daemon", "unit", "restart",
+                "failed service", "service status", "dich vu",
+                "khoi dong lai dich vu", "dich vu loi",
+            ),
+        )
+        log_issue = self._contains_any(
+            request,
+            (
+                "log", "journal", "error", "errors", "exception",
+                "crash", "failure", "failed", "not starting",
+                "keeps stopping", "system error", "loi he thong",
+                "nhat ky", "khong khoi dong", "bi dung",
+                "that bai",
+            ),
+        )
+        endpoint_issue = bool(url) or self._looks_like_unreachable(request)
+
+        # Probe the user-supplied endpoint only; never invent localhost targets.
+        if url:
+            parsed_url = urlsplit(url)
+            host = parsed_url.hostname
+
+            if host:
+                try:
+                    port = parsed_url.port or (
+                        443 if parsed_url.scheme.casefold() == "https" else 80
+                    )
+                except ValueError:
+                    port = None
+
+                if port is not None and 1 <= port <= 65535:
+                    add(
+                        "check_tcp_connectivity",
+                        {"host": host, "port": port},
+                        "Check TCP connectivity to the supplied endpoint",
+                    )
+
+            add(
+                "check_http_endpoint",
+                {"url": url},
+                "Inspect the HTTP response from the supplied endpoint",
+            )
+
+        # Explicit service failure: status -> failed-service context -> logs.
+        if service_name:
+            add(
+                "get_service_status",
+                {"service_name": service_name},
+                "Inspect the explicitly named systemd unit",
+            )
+            if log_issue:
+                add(
+                    "get_failed_services",
+                    {},
+                    "Collect systemd failed-service context",
+                )
+            add(
+                "get_service_logs",
+                {"service_name": service_name},
+                "Collect logs for the explicitly named unit",
+            )
+
+        if disk_issue:
+            add(
+                "get_disk_usage",
+                {"path": "/"},
+                "Measure root filesystem capacity",
+            )
+            add(
+                "get_system_overview",
+                {},
+                "Collect system-level context for disk investigation",
+            )
+            add(
+                "list_top_processes",
+                {"limit": 5},
+                "Inspect top processes for additional workload context",
+            )
+
+        if resource_issue and not disk_issue:
+            add(
+                "get_system_overview",
+                {},
+                "Collect CPU, memory, uptime, and process-count metrics",
+            )
+            add(
+                "list_top_processes",
+                {"limit": 10},
+                "Identify processes with the largest memory footprint",
+            )
+
+        if security_issue:
+            add(
+                "inspect_security_posture",
+                {},
+                "Inspect high-level runtime security posture",
+            )
+            add(
+                "get_recent_errors",
+                {"lines": 50, "since_minutes": 60},
+                "Collect recent system errors for security context",
+            )
+
+        if network_issue or (endpoint_issue and not url):
+            add(
+                "get_network_state",
+                {},
+                "Inspect network interfaces and assigned IP addresses",
+            )
+            add(
+                "get_recent_errors",
+                {"lines": 50, "since_minutes": 60},
+                "Collect recent system errors relevant to connectivity",
+            )
+
+        if service_issue and not service_name:
+            add(
+                "get_failed_services",
+                {},
+                "List systemd services currently reported as failed",
+            )
+            add(
+                "get_recent_errors",
+                {"lines": 50, "since_minutes": 60},
+                "Inspect recent errors for service-related evidence",
+            )
+
+        if log_issue and not service_name:
+            add(
+                "get_recent_errors",
+                {"lines": 50, "since_minutes": 60},
+                "Inspect recent error-level journal entries",
+            )
+            add(
+                "get_failed_services",
+                {},
+                "Check for failed systemd services",
+            )
+
+        # An unclassified request gets a read-only survey, not an arbitrary
+        # service restart, guessed service, or fabricated endpoint.
+        if not candidates:
+            add(
+                "get_system_overview",
+                {},
+                "Establish a baseline of system resources",
+            )
+            add(
+                "get_disk_usage",
+                {"path": "/"},
+                "Inspect root filesystem capacity",
+            )
+            add(
+                "get_network_state",
+                {},
+                "Inspect local network configuration",
+            )
+            add(
+                "get_failed_services",
+                {},
+                "Check for services reported as failed",
+            )
+            add(
+                "get_recent_errors",
+                {"lines": 50, "since_minutes": 60},
+                "Inspect recent system error messages",
+            )
+
+        if not candidates:
+            rationale = (
+                "No applicable read-only diagnostic tools are registered."
+            )
+        elif not any(
+            (
+                disk_issue, resource_issue, security_issue, network_issue,
+                service_issue, log_issue, endpoint_issue,
+            )
+        ):
+            rationale = (
+                "General system survey using registered read-only diagnostic tools."
+            )
         else:
-            candidates = [
-                PlanStep(
-                    "get_service_status",
-                    {"service_name": service_name},
-                    "Check service state",
-                ),
-                PlanStep("get_failed_services", {}, "List failed services"),
-                PlanStep(
-                    "get_service_logs",
-                    {"service_name": service_name},
-                    "Collect service logs",
-                ),
-            ]
-            rationale = "Service triage: inspect state, failed services, and logs."
+            categories = []
+            if endpoint_issue:
+                categories.append("endpoint connectivity")
+            if service_issue:
+                categories.append("service state")
+            if disk_issue:
+                categories.append("filesystem capacity")
+            if resource_issue:
+                categories.append("system resources")
+            if network_issue:
+                categories.append("network configuration")
+            if security_issue:
+                categories.append("security posture")
+            if log_issue:
+                categories.append("system errors and logs")
 
-        steps = tuple(step for step in candidates if step.tool_name in available)
-        if not steps:
-            rationale += " No matching read-only tools are registered."
-        return AgentPlan(steps=steps, rationale=rationale)
+            rationale = (
+                "Read-only investigation for "
+                + ", ".join(categories)
+                + "; conclusions depend on collected evidence."
+            )
 
-    def _service_name_from_request(self, request: str) -> str:
+        return AgentPlan(steps=tuple(candidates), rationale=rationale)
+
+    @staticmethod
+    def _normalize_request(request: str) -> str:
+        """Normalize case and Vietnamese diacritics for phrase matching."""
+        import unicodedata
+
+        request = request.casefold().replace("đ", "d")
+        return "".join(
+            character
+            for character in unicodedata.normalize("NFKD", request)
+            if not unicodedata.combining(character)
+        )
+
+    @staticmethod
+    def _contains_any(request: str, phrases: Sequence[str]) -> bool:
+        return any(phrase in request for phrase in phrases)
+
+    @staticmethod
+    def _explicit_service_name_from_request(request: str) -> str | None:
+        """Return a systemd unit only if its name appears in the request."""
         match = re.search(r"\b[a-zA-Z0-9_.@-]+\.service\b", request)
-        if match:
-            return match.group(0)
+        return match.group(0) if match else None
+
+    def _default_service_name(self) -> str:
+        """Compatibility helper; generic requests must not use this default."""
         if self._config.services.allowlist:
             return self._config.services.allowlist[0]
         return "demo-web.service"
@@ -131,37 +357,29 @@ class RuleBasedPlanner:
             return None
         return match.group(0).rstrip(".,);]")
 
-    @staticmethod
-    def _looks_like_disk_pressure(request: str) -> bool:
-        keywords = (
-            "disk pressure",
-            "disk usage",
-            "disk space",
-            "filesystem",
-            "disk full",
-            "ổ đĩa",
-            "dung lượng đĩa",
-            "dung lượng ổ đĩa",
-            "ổ cứng đầy",
+    @classmethod
+    def _looks_like_disk_pressure(cls, request: str) -> bool:
+        normalized = cls._normalize_request(request)
+        return cls._contains_any(
+            normalized,
+            (
+                "disk pressure", "disk usage", "disk space", "filesystem",
+                "disk full", "o dia", "dung luong dia", "o cung day",
+            ),
         )
-        return any(keyword in request for keyword in keywords)
 
-    @staticmethod
-    def _looks_like_unreachable(request: str) -> bool:
-        keywords = (
-            "unreachable",
-            "endpoint",
-            "tcp",
-            "http",
-            "not reachable",
-            "cannot connect",
-            "connection failed",
-            "không truy cập",
-            "khong truy cap",
-            "không kết nối",
-            "khong ket noi",
+    @classmethod
+    def _looks_like_unreachable(cls, request: str) -> bool:
+        normalized = cls._normalize_request(request)
+        return cls._contains_any(
+            normalized,
+            (
+                "unreachable", "endpoint", "tcp", "http", "not reachable",
+                "cannot connect", "connection failed", "connection refused",
+                "khong truy cap", "khong ket noi", "khong the ket noi",
+                "khong phan hoi", "ket noi that bai",
+            ),
         )
-        return any(keyword in request for keyword in keywords)
 
 
 class Agent:
@@ -188,7 +406,28 @@ class Agent:
         self.registry = registry
         self.config = config
         self.audit = audit
-        self.planner = planner or RuleBasedPlanner(config)
+        self._llm_client: LLMClient | None = None
+        self._fallback_planner: RuleBasedPlanner | None = None
+
+        if planner is not None:
+            # Explicitly injected planners remain available for tests/integrations.
+            self.planner = planner
+        elif config.llm.enabled and config.llm.planning_mode == "llm":
+            # LLM planning is opt-in: local CPU inference must not sit on the
+            # critical path unless the operator explicitly selects it.
+            llm_client = OpenAICompatibleLLMClient(config.llm)
+            self.planner = llm_client
+            if config.llm.summary_enabled:
+                self._llm_client = llm_client
+            if config.llm.fallback_to_rules:
+                self._fallback_planner = RuleBasedPlanner(config)
+        else:
+            # Default is deterministic rules-first triage. The LLM is only
+            # initialized for optional post-investigation summaries when enabled.
+            self.planner = RuleBasedPlanner(config)
+            if config.llm.enabled and config.llm.summary_enabled:
+                self._llm_client = OpenAICompatibleLLMClient(config.llm)
+
         if config.audit.enabled and audit is None:
             raise ValueError("An audit sink is required when audit.enabled is true")
 
@@ -208,23 +447,91 @@ class Agent:
             )
             return context
 
+        available_tools = [
+            spec for spec in self.registry.list_tools() if not spec.changes_system
+        ]
+        used_rule_fallback = False
         try:
-            available_tools = [
-                spec for spec in self.registry.list_tools() if not spec.changes_system
-            ]
             plan = self.planner.create_plan(context.user_request, available_tools)
             if not isinstance(plan, AgentPlan):
                 raise TypeError("Planner must return an AgentPlan")
-        except Exception as exc:
-            context.status = "failed"
-            context.findings.append(f"Planning failed: {type(exc).__name__}.")
-            self._record_event(
-                "incident.planning_failed",
-                context,
-                {"error_type": type(exc).__name__},
+        except Exception as exc:  # noqa: BLE001
+            if self._fallback_planner is None:
+                context.status = "failed"
+                context.findings.append(f"Planning failed: {type(exc).__name__}.")
+                self._record_event(
+                    "incident.planning_failed",
+                    context,
+                    {"error_type": type(exc).__name__},
+                )
+                self._record_final(context)
+                return context
+
+            # Fallback is deterministic and read-only. Do not include exception text,
+            # because provider errors can contain sensitive request metadata.
+            used_rule_fallback = True
+            planning_error_type = type(exc)
+            planning_safe_detail = ""
+            if (
+                planning_error_type.__module__ == "linux_admin.llm_client"
+                and planning_error_type.__name__ == "LLMClientError"
+            ):
+                error_message = str(exc)
+                if error_message.startswith("LLM request timed out after "):
+                    timeout = error_message.removeprefix("LLM request timed out after ").removesuffix(" seconds")
+                    if timeout.replace(".", "", 1).isdigit():
+                        planning_safe_detail = f" Detail: LLM request timed out after {timeout} seconds."
+                elif error_message.startswith("LLM API returned HTTP "):
+                    http_code = error_message.removeprefix("LLM API returned HTTP ").split(";", 1)[0].strip()
+                    if http_code.isdigit() and len(http_code) == 3:
+                        planning_safe_detail = f" Detail: LLM provider returned HTTP {http_code}."
+                elif error_message in (
+                    "Could not connect to the configured LLM endpoint",
+                    "LLM network request failed",
+                ):
+                    planning_safe_detail = " Detail: LLM network connection failed."
+                elif error_message in (
+                    "LLM response had an unsupported format",
+                    "LLM response content must be a string",
+                    "LLM returned malformed JSON for its plan",
+                    "LLM plan must be a JSON object",
+                    "LLM plan must contain string rationale and list steps",
+                ):
+                    planning_safe_detail = " Detail: LLM returned an invalid response or plan."
+            context.findings.append(
+                f"LLM planning was unavailable ({planning_error_type.__name__}); "
+                f"using the configured rule-based read-only fallback.{planning_safe_detail}"
             )
-            self._record_final(context)
-            return context
+            if not self._record_event(
+                "incident.llm_fallback",
+                context,
+                {"phase": "planning", "error_type": type(exc).__name__},
+            ):
+                context.status = "failed"
+                context.findings.append(
+                    "Audit failed while recording the LLM fallback; "
+                    "no tools were invoked."
+                )
+                self._record_final(context)
+                return context
+            try:
+                plan = self._fallback_planner.create_plan(
+                    context.user_request, available_tools
+                )
+                if not isinstance(plan, AgentPlan):
+                    raise TypeError("Fallback planner must return an AgentPlan")
+            except Exception as fallback_exc:  # noqa: BLE001
+                context.status = "failed"
+                context.findings.append(
+                    f"Rule-based fallback failed: {type(fallback_exc).__name__}."
+                )
+                self._record_event(
+                    "incident.planning_failed",
+                    context,
+                    {"error_type": type(fallback_exc).__name__},
+                )
+                self._record_final(context)
+                return context
 
         context.findings.append(plan.rationale)
         plan_was_truncated = len(plan.steps) > self.config.agent.max_steps
@@ -261,8 +568,19 @@ class Agent:
             return context
 
         audit_failed = False
-        for step in selected_steps:
+        pending_steps = list(selected_steps)
+        executed_steps: list[PlanStep] = []
+        executed_keys: set[tuple[str, str]] = set()
+
+        while pending_steps and context.steps < self.config.agent.max_steps:
+            step = pending_steps.pop(0)
+            step_key = self._step_identity(step)
+            # Execute explicitly planned steps, including repetitions, up to
+            # max_steps. Adaptive follow-ups are de-duplicated by candidate().
+            executed_keys.add(step_key)
+            executed_steps.append(step)
             context.steps += 1
+
             spec = self.registry.get_spec(step.tool_name)
             if spec is None:
                 result = ToolResult(
@@ -271,7 +589,7 @@ class Agent:
                     error="Planned tool is not registered",
                 )
             elif spec.changes_system:
-                # Defense in depth: the investigation planner may never run actions.
+                # Defense in depth: investigation may only invoke read-only tools.
                 result = ToolResult(
                     tool_name=step.tool_name,
                     status="denied",
@@ -283,6 +601,7 @@ class Agent:
             context.evidence.append(result)
             context.findings.append(self._summarize_result(result))
             event_type = "tool.completed" if result.ok else "tool.failed"
+
             if not self._record_event(
                 event_type,
                 context,
@@ -296,6 +615,93 @@ class Agent:
             ):
                 audit_failed = True
                 break
+
+            # A systemd unit reported as not-found cannot provide useful
+            # current unit logs. Skip only queued log checks for that exact unit.
+            if (
+                result.tool_name == "get_service_status"
+                and result.ok
+                and result.data.get("load_state") == "not-found"
+            ):
+                service_name = result.data.get("service_name")
+                if isinstance(service_name, str) and service_name:
+                    previous_pending_count = len(pending_steps)
+                    pending_steps = [
+                        pending_step
+                        for pending_step in pending_steps
+                        if not (
+                            pending_step.tool_name == "get_service_logs"
+                            and pending_step.arguments.get("service_name")
+                            == service_name
+                        )
+                    ]
+                    skipped_log_count = (
+                        previous_pending_count - len(pending_steps)
+                    )
+
+                    if skipped_log_count:
+                        audit_ok = self._record_event(
+                            "incident.plan_step_skipped",
+                            context,
+                            {
+                                "trigger_tool": result.tool_name,
+                                "reason": "systemd_unit_not_found",
+                                "skipped_tool": "get_service_logs",
+                                "service_name": service_name,
+                                "skipped_count": skipped_log_count,
+                            },
+                        )
+                        if not audit_ok:
+                            audit_failed = True
+                            context.findings.append(
+                                "Audit persistence failed while recording "
+                                "a skipped service-log check; processing stopped."
+                            )
+                            break
+
+                        context.findings.append(
+                            f"Skipped {skipped_log_count} queued "
+                            f"get_service_logs check(s) for {service_name}: "
+                            "systemd reported load_state=not-found."
+                        )
+
+            follow_up = self._choose_adaptive_follow_up(
+                result=result,
+                evidence=context.evidence,
+                executed_steps=executed_steps,
+                pending_steps=pending_steps,
+                available_tools=available_tools,
+            )
+            if follow_up is not None:
+                if not self._record_event(
+                    "incident.follow_up_planned",
+                    context,
+                    {
+                        "trigger_tool": result.tool_name,
+                        "trigger_status": result.status,
+                        "follow_up_tool": follow_up.tool_name,
+                        "arguments": dict(follow_up.arguments),
+                        "purpose": follow_up.purpose,
+                    },
+                ):
+                    audit_failed = True
+                    context.findings.append(
+                        "Audit persistence failed while recording adaptive follow-up; "
+                        "no further tool was invoked."
+                    )
+                    break
+
+                pending_steps.insert(0, follow_up)
+                context.findings.append(
+                    f"Adaptive follow-up selected: {follow_up.tool_name} — "
+                    f"{follow_up.purpose}."
+                )
+
+        if pending_steps and context.steps >= self.config.agent.max_steps:
+            context.findings.append(
+                "Investigation reached the configured max_steps limit; "
+                "some queued diagnostic checks were not run."
+            )
 
         successful_results = sum(1 for result in context.evidence if result.ok)
         if audit_failed:
@@ -318,8 +724,278 @@ class Agent:
                 "Investigation completed. This does not mean the incident is repaired."
             )
 
+        # Add a deterministic, evidence-based diagnosis. This layer does not call
+        # the LLM and never executes commands or changes system state.
+        if context.evidence:
+            diagnostic_report = diagnose_incident(
+                context.user_request,
+                context.evidence,
+            )
+            context.findings.extend(diagnostic_report.to_findings())
+
+        # When the real LLM planned the investigation, send bounded tool evidence
+        # back for synthesis. A summary failure must be visible and must not erase
+        # the local evidence collected during the investigation.
+        if (
+            context.status == "completed"
+            and self._llm_client is not None
+            and not used_rule_fallback
+        ):
+            try:
+                executed_plan = AgentPlan(
+                    steps=tuple(executed_steps), rationale=plan.rationale
+                )
+                summary = self._llm_client.summarize(
+                    context.user_request, executed_plan, context.evidence
+                )
+                context.findings.append(f"LLM analysis: {summary}")
+                audit_ok = self._record_event(
+                    "incident.llm_summary_completed",
+                    context,
+                    {
+                        "model": self.config.llm.model,
+                        "summary_characters": len(summary),
+                        "evidence_count": len(context.evidence),
+                    },
+                )
+                if not audit_ok:
+                    context.status = "failed"
+                    context.findings.append(
+                        "Audit failed while recording the LLM analysis; "
+                        "report audit failure."
+                    )
+            except Exception as exc:  # noqa: BLE001
+                error_type = type(exc)
+                safe_detail = ""
+                if (
+                    error_type.__module__ == "linux_admin.llm_client"
+                    and error_type.__name__ == "LLMClientError"
+                ):
+                    safe_detail = f" Detail: {exc}."
+
+                if self.config.llm.fallback_to_rules:
+                    context.findings.append(
+                        f"LLM evidence analysis failed ({error_type.__name__}); "
+                        "using the deterministic tool findings instead. "
+                        f"No LLM diagnosis was produced.{safe_detail}"
+                    )
+                else:
+                    context.findings.append(
+                        f"LLM evidence analysis failed ({error_type.__name__}); "
+                        "the collected tool evidence remains available, but no "
+                        f"LLM diagnosis was produced.{safe_detail}"
+                    )
+                if not self._record_event(
+                    "incident.llm_summary_failed",
+                    context,
+                    {"error_type": type(exc).__name__},
+                ):
+                    context.status = "failed"
+                    context.findings.append(
+                        "Audit failed while recording the LLM analysis failure."
+                    )
+
         self._record_final(context)
         return context
+
+    @staticmethod
+    def _step_identity(step: PlanStep) -> tuple[str, str]:
+        """Create a stable identity for de-duplicating bounded tool calls."""
+        return (
+            step.tool_name,
+            json.dumps(
+                dict(step.arguments),
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ),
+        )
+
+    def _choose_adaptive_follow_up(
+        self,
+        *,
+        result: ToolResult,
+        evidence: Sequence[ToolResult],
+        executed_steps: Sequence[PlanStep],
+        pending_steps: Sequence[PlanStep],
+        available_tools: Sequence[ToolSpec],
+    ) -> PlanStep | None:
+        """Select one evidence-driven, read-only next step when useful."""
+        available = {
+            spec.name for spec in available_tools if not spec.changes_system
+        }
+        executed_keys = {
+            self._step_identity(step) for step in executed_steps
+        }
+        pending_keys = {
+            self._step_identity(step) for step in pending_steps
+        }
+
+        def candidate(
+            name: str,
+            arguments: dict,
+            purpose: str,
+        ) -> PlanStep | None:
+            if name not in available:
+                return None
+            step = PlanStep(name, arguments, purpose)
+            identity = self._step_identity(step)
+            if identity in executed_keys or identity in pending_keys:
+                return None
+            return step
+
+        def is_loopback(host: object) -> bool:
+            value = str(host or "").strip().strip("[]").casefold()
+            return (
+                value == "localhost"
+                or value == "::1"
+                or value.startswith("127.")
+            )
+
+        # If systemd reports failed units, inspect the first unit not already
+        # covered by the current plan. The result decides whether logs are useful.
+        if result.tool_name == "get_failed_services" and result.ok:
+            raw_units = result.data.get("failed_services", [])
+            if isinstance(raw_units, list):
+                for raw_unit in raw_units[:5]:
+                    if not isinstance(raw_unit, str) or not raw_unit.strip():
+                        continue
+                    unit = raw_unit.strip()
+                    status_step = candidate(
+                        "get_service_status",
+                        {"service_name": unit},
+                        f"Inspect reported failed unit {unit}",
+                    )
+                    if status_step is not None:
+                        return status_step
+
+                    matching_status = None
+                    for step, tool_result in zip(executed_steps, evidence):
+                        if (
+                            step.tool_name == "get_service_status"
+                            and step.arguments.get("service_name") == unit
+                        ):
+                            matching_status = tool_result
+                            break
+
+                    if (
+                        matching_status is not None
+                        and matching_status.ok
+                        and matching_status.data.get("active_state") == "failed"
+                    ):
+                        log_step = candidate(
+                            "get_service_logs",
+                            {"service_name": unit},
+                            f"Inspect recent logs for failed unit {unit}",
+                        )
+                        if log_step is not None:
+                            return log_step
+
+        # A failed status result can also trigger targeted logs if no matching
+        # log check is already queued.
+        if (
+            result.tool_name == "get_service_status"
+            and result.ok
+            and result.data.get("active_state") == "failed"
+        ):
+            unit = result.data.get("service_name")
+            if isinstance(unit, str) and unit.strip():
+                log_step = candidate(
+                    "get_service_logs",
+                    {"service_name": unit},
+                    f"Inspect recent logs for failed unit {unit}",
+                )
+                if log_step is not None:
+                    return log_step
+
+        # A refused TCP connection to loopback calls for local listener inspection,
+        # rather than assuming that DNS or the Internet is the cause.
+        if (
+            result.tool_name == "check_tcp_connectivity"
+            and result.data.get("reachable") is False
+        ):
+            host = result.data.get("host")
+            port = result.data.get("port")
+            if (
+                is_loopback(host)
+                and isinstance(port, int)
+                and not isinstance(port, bool)
+                and 1 <= port <= 65535
+            ):
+                return candidate(
+                    "inspect_listening_port",
+                    {"port": port},
+                    f"Inspect local listeners for refused endpoint port {port}",
+                )
+
+            if result.status == "timeout":
+                return candidate(
+                    "get_network_state",
+                    {},
+                    "Inspect local interfaces after a TCP timeout",
+                )
+
+        # If the loopback listener query shows no listener, finish any already
+        # planned endpoint/service checks before collecting generic journal context.
+        if (
+            result.tool_name == "inspect_listening_port"
+            and result.ok
+            and isinstance(result.data.get("listeners"), list)
+            and not result.data["listeners"]
+        ):
+            pending_primary = {
+                "check_http_endpoint",
+                "get_service_status",
+                "get_service_logs",
+                "get_recent_errors",
+            }
+            if not any(step.tool_name in pending_primary for step in pending_steps):
+                return candidate(
+                    "get_recent_errors",
+                    {"lines": 50, "since_minutes": 60},
+                    "Collect recent system errors after finding no local listener",
+                )
+
+        # Once an HTTP probe confirms that a loopback endpoint is unavailable,
+        # use the earlier socket evidence to decide whether journal context is useful.
+        if (
+            result.tool_name == "check_http_endpoint"
+            and result.data.get("reachable") is False
+        ):
+            host = result.data.get("host")
+            port = result.data.get("port")
+            if isinstance(port, int) and not isinstance(port, bool) and is_loopback(host):
+                no_listener_found = any(
+                    step.tool_name == "inspect_listening_port"
+                    and step.arguments.get("port") == port
+                    and tool_result.ok
+                    and isinstance(tool_result.data.get("listeners"), list)
+                    and not tool_result.data["listeners"]
+                    for step, tool_result in zip(executed_steps, evidence)
+                )
+                pending_specific_checks = {
+                    "get_service_status",
+                    "get_service_logs",
+                    "get_recent_errors",
+                }
+                if no_listener_found and not any(
+                    step.tool_name in pending_specific_checks
+                    for step in pending_steps
+                ):
+                    return candidate(
+                        "get_recent_errors",
+                        {"lines": 50, "since_minutes": 60},
+                        "Collect recent system errors after an unavailable local endpoint",
+                    )
+
+            if result.status == "timeout":
+                return candidate(
+                    "get_network_state",
+                    {},
+                    "Inspect local interfaces after an HTTP timeout",
+                )
+
+        return None
 
     def _record_event(
         self,
@@ -337,7 +1013,7 @@ class Agent:
                 incident_id=context.incident_id,
                 details=details,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             # Do not leak DB paths, SQL, or secret-bearing exception text to the user.
             return False
         return True
@@ -365,10 +1041,81 @@ class Agent:
             error = result.error or "no error details"
             return f"{result.tool_name}: {result.status} ({error})."
 
+        if result.tool_name == "get_service_status":
+            data = result.data
+            service_name = data.get("service_name", "unknown")
+            load_state = data.get("load_state", "unknown")
+            active_state = data.get("active_state", "unknown")
+            sub_state = data.get("sub_state", "unknown")
+
+            # LoadState takes precedence: systemd may report ActiveState=inactive
+            # for a unit that it did not find.
+            if load_state == "not-found":
+                return (
+                    f"get_service_status: success; service '{service_name}' "
+                    "was not found by systemd (load_state=not-found)."
+                )
+
+            if active_state == "active":
+                return (
+                    f"get_service_status: success; service '{service_name}' "
+                    f"is active ({sub_state})."
+                )
+
+            if active_state == "failed":
+                return (
+                    f"get_service_status: success; service '{service_name}' "
+                    "is in failed state; inspect its logs and execution result "
+                    "to investigate the cause."
+                )
+
+            if active_state == "inactive":
+                service_type = data.get("service_type", "unknown")
+                last_result = data.get("result", "unknown")
+                exit_status = str(data.get("exec_main_status", "unknown"))
+                remain_after_exit = data.get("remain_after_exit", "unknown")
+                success_evidence = (
+                    last_result == "success" and exit_status == "0"
+                )
+                if success_evidence:
+                    detail = (
+                        "systemd reports the last execution result as success "
+                        "with exit status 0"
+                    )
+                else:
+                    detail = (
+                        f"last_result={last_result}, "
+                        f"exec_main_status={exit_status}"
+                    )
+                return (
+                    f"get_service_status: success; service '{service_name}' "
+                    f"is currently inactive ({sub_state}); type={service_type}; "
+                    f"{detail}; remain_after_exit={remain_after_exit}. "
+                    "Inactive state alone does not establish a failure."
+                )
+
+            highlights = [
+                f"load_state={load_state!r}",
+                f"active_state={active_state!r}",
+                f"sub_state={sub_state!r}",
+            ]
+            return (
+                f"get_service_status: success; service '{service_name}'; "
+                + "; ".join(highlights)
+                + ". State is not classified; inspect the returned evidence."
+            )
+
         highlights: list[str] = []
         preferred_keys = (
+            "load_state",
             "active_state",
+            "sub_state",
             "is_active",
+            "service_type",
+            "result",
+            "exec_main_code",
+            "exec_main_status",
+            "remain_after_exit",
             "used_percent",
             "usage_percent",
             "reachable",

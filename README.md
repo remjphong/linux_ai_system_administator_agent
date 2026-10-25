@@ -1,41 +1,44 @@
 # Linux AI Agent System Administrator
 
-A Python project for Linux system observation, incident diagnosis, and controlled
-administration. This repository is designed for a three-person team that may
-write code on Windows 10/11 but validates Linux administration behavior on an
-Ubuntu VM.
+A safety-first Python application for Linux system observation, incident diagnosis,
+and controlled service administration. The team can develop and run unit tests on
+Windows 10/11, while systemd/journald integration must be verified in Ubuntu.
 
-## Project status
+## Implemented in this branch
 
-The starter foundation currently provides:
+- Shared contracts and validated YAML configuration.
+- Registry with explicit tool registration, argument validation, and a guard that
+  blocks ordinary invocation of state-changing tools.
+- Real read-only system tools using `psutil` for CPU, memory, disk, process, and
+  network-interface data.
+- Linux adapters for `systemctl` and `journalctl` with fixed argument arrays,
+  input validation, bounded output, and finite timeouts.
+- TCP/HTTP endpoint checks with bounded timeouts; HTTP redirects are not followed.
+- Read-only security posture checks.
+- Deterministic policy engine, console approval records, controlled executor, and
+  SQLite audit persistence.
+- Post-action verification and a bounded recovery manager that retries health checks,
+  not state-changing commands.
+- Rule-based investigation Agent that can use real registered read-only tools.
 
-- A `linux-admin` command-line entry point.
-- Loading and validation of the shared YAML configuration.
-- Shared contracts: `ToolResult`, `ToolSpec`, `ActionRequest`, `PolicyDecision`,
-  `ApprovalRecord`, and `IncidentContext`.
-- A registry with explicit tool registration, argument validation, and guards
-  against normal invocation of system-changing tools.
-- Unit tests for contracts, registry, and configuration.
+The LLM is disabled by default. The current incident planner is rule-based; no model
+is allowed to authorize actions. Service restart remains disabled by default and is
+never performed by the investigation Agent. The explicit `--restart-service` command
+uses `PolicyEngine`, asks for console approval only when enabled policy requires it,
+then performs bounded post-action health verification. It will not restart with the
+default observe/dry-run configuration.
 
-The full incident agent, real Linux tool adapters, production policy workflow,
-approval interaction, system-changing executor, post-action verification, SQLite
-audit persistence, and LLM adapter are not yet implemented. Placeholder files are
-not evidence that these features work.
+## Supported environments
 
-## Supported development environments
-
-- Windows 10/11: code editing and unit tests. Linux-only integration behavior
-  must be mocked or tested on the Ubuntu VM.
-- Ubuntu 22.04 or a compatible Ubuntu VM: development and Linux integration tests.
+- Windows 10/11: package setup, code development, unit tests, `psutil` observations,
+  network diagnostics, and tool-level tests. Windows does not provide `systemctl` or
+  `journalctl`; Linux-specific tools return explicit unsupported/failure results.
+- Ubuntu 22.04+ or compatible Ubuntu VM: intended environment for systemd/journald
+  integration tests and controlled service-restart tests.
 - Python 3.10 or newer.
-
-The application administers Linux systems; native Windows is not the target for
-`systemctl` or `journalctl` operations. Do not run Linux integration commands
-from PowerShell and expect them to behave like Ubuntu.
 
 ## Setup on Windows 10/11 (PowerShell)
 
-Install Python 3.10+ and ensure the Python Launcher (`py`) or `python` is on PATH.
 Open PowerShell in the repository root:
 
 ```powershell
@@ -48,26 +51,10 @@ pytest -q
 ruff check .
 ```
 
-If the PowerShell execution policy prevents virtual-environment activation, run
-the following only in the current PowerShell process, then activate again:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\.venv\Scripts\Activate.ps1
-```
-
-If `py -3.10` is unavailable but `python` points to Python 3.10 or newer, use:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-For Command Prompt (`cmd.exe`), activation is:
-
-```bat
-.venv\Scripts\activate.bat
-```
+If `py -3.10` is unavailable but `python` is Python 3.10+, replace the first command
+with `python -m venv .venv`. If PowerShell blocks activation, use
+`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` in that same shell, then
+activate again. For Command Prompt, activate with `.venv\Scripts\activate.bat`.
 
 ## Setup on Ubuntu
 
@@ -82,55 +69,71 @@ pytest -q
 ruff check .
 ```
 
-If `venv` is not installed on Ubuntu, install the matching package, for example:
+If `venv` is missing on Ubuntu, install the matching `python3-venv` package. Never
+replace Ubuntu's system Python to satisfy this project.
+
+## CLI
 
 ```bash
-sudo apt update
-sudo apt install python3-venv
-```
-
-## Common commands (Windows and Ubuntu)
-
-Once the virtual environment is activated:
-
-```text
 linux-admin --help
 linux-admin --version
 linux-admin --check-config
-pytest -q
-ruff check .
+linux-admin --list-tools
+linux-admin --investigate "Investigate disk pressure on filesystem /"
+linux-admin --investigate "Investigate service failure for demo-web.service"
+linux-admin --investigate "Investigate why http://127.0.0.1:8080/health is unreachable"
+# Explicit action entry point; safe defaults will deny/skip it unless configured
+linux-admin --restart-service demo-web.service --reason "Test controlled restart"
 ```
 
-The `linux-admin` command is installed by the editable package. If it is not
-found, check that the virtual environment is activated and rerun
-`python -m pip install -e ".[dev]"`.
+`--investigate` runs a bounded read-only investigation and prints structured JSON.
+A status of `completed` means evidence collection completed; it does not mean the
+incident was repaired. Service diagnostics require Ubuntu with systemd and permissions
+to read the relevant service/journal.
+
+The editable install exposes `linux-admin` from `linux_admin.main:main`. If the command
+is not found, check the virtual environment is active and run `python -m pip install -e
+".[dev]"` again.
 
 ## Configuration
 
-- `config/agent.yaml`: application metadata, operation mode, dry-run, step/time
-  limits, LLM toggle, and audit database path.
-- `config/policy.yaml`: explicit action rules and fail-closed default policy.
+- `config/agent.yaml`: observe/assisted mode, dry-run, step limit, tool timeout, LLM
+  toggle, and SQLite audit path.
+- `config/policy.yaml`: explicit action rules; missing rules are denied.
 - `config/services.yaml`: service allowlist and restart kill switch.
-- `.env.example`: names of environment variables that may be used for an LLM.
+- `.env.example`: environment variable names; copy to `.env` to configure an LLM
+  provider and/or the separate Tavily search tool. Never commit `.env` or real keys.
 
-The LLM is disabled by default and service restart is disabled by default. Copy
-`.env.example` to `.env` only when necessary, and never commit the real `.env` or
-an API key. Relative paths such as `data/audit.db` are resolved from the project
-root rather than the process's current working directory.
+Default operation is `mode: observe`, `dry_run: true`, LLM disabled, and service
+restart disabled. To test actual restart, use an isolated Ubuntu VM snapshot, configure
+one test service, deliberately review policy and permissions, and use
+`ControlledExecutor` plus an approval record. Never enable restart on an important
+host just to test the application.
 
-## Shared interface and safety rules
+## Shared safety rules
 
 1. Every registered tool exposes `.spec: ToolSpec` and implements
    `execute(**kwargs) -> ToolResult`.
-2. `ActionRequest` is a proposal, not authorization to execute.
-3. Policy decisions and approvals must bind to the exact action ID and action
-   arguments; approval must not transfer to a different action.
-4. Policy defaults to deny. System-changing operations must be explicitly
-   enabled, allowlisted, and require approval where configured.
-5. Do not expose an arbitrary shell-command tool to the LLM.
-6. Verify actual post-action state instead of trusting only an exit code.
-7. A configuration value does not enforce itself; the application code and tests
-   must load and enforce the value before the feature can be considered implemented.
+2. `ActionRequest` is a proposal, not authorization.
+3. Policy decisions and approvals are bound to the exact action ID and argument
+   fingerprint; approval cannot transfer to changed arguments.
+4. State-changing tools cannot be called through the ordinary Registry invocation.
+5. Do not execute arbitrary shell commands from users or LLM output; do not use
+   `shell=True`, automatic `sudo`, or privilege escalation.
+6. Verify postconditions instead of trusting only a command exit code.
+7. If required audit persistence fails before execution, fail closed. If it fails after
+   an action, report uncertainty and verify system state before retrying.
+8. Unit tests use fixtures/mocks for OS commands and networking. Run real service tests
+   only in a disposable Ubuntu VM.
 
-Changes to `contracts.py`, `config/*.yaml`, or tool interfaces affect all three
-team members. Notify A/B/C, update tests, and review the change before merging.
+Changes to `contracts.py`, `config/*.yaml`, or tool specs affect every team member.
+Notify A/B/C, update tests and docs, and review the change before merging.
+
+
+## Real LLM and Tavily web search
+
+The project supports an OpenAI-compatible chat-completions API for LLM planning and
+evidence synthesis. Tavily is integrated separately as an optional read-only web
+search tool; a Tavily key alone does not enable LLM reasoning. See
+[`docs/llm-and-tavily-setup.md`](docs/llm-and-tavily-setup.md) for the exact `.env`
+variables, configuration switches, validation commands, and end-to-end workflow.
