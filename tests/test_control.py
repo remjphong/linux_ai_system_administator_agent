@@ -1114,3 +1114,43 @@ def test_investigation_exit_code_separates_operation_from_resolution(
         cli._investigation_exit_code(incident_status, remediation_status)
         == expected_exit_code
     )
+
+def test_unknown_follow_up_answers_are_recognized():
+    from linux_admin.main import _is_unknown_follow_up_answer
+
+    for answer in (
+        "không xác định",
+        " Chưa biết. ",
+        "không rõ",
+        "unknown",
+        "I don't know",
+    ):
+        assert _is_unknown_follow_up_answer(answer)
+
+
+def test_specific_follow_up_answers_are_not_treated_as_unknown():
+    from linux_admin.main import _is_unknown_follow_up_answer
+
+    for answer in (
+        "nginx.service",
+        "Ứng dụng của tôi chạy bằng systemd unit api.service",
+        "The endpoint is served by nginx",
+    ):
+        assert not _is_unknown_follow_up_answer(answer)
+
+def test_test_only_follow_up_answer_is_not_operational_context():
+    from linux_admin.main import _is_test_only_follow_up_answer
+
+    answer = (
+        "Tên unit giả lập là test-only-clarification.service; "
+        "chỉ dùng để kiểm thử, không yêu cầu khởi động dịch vụ."
+    )
+    assert _is_test_only_follow_up_answer(answer)
+
+
+def test_real_service_context_is_not_misclassified_as_test_only():
+    from linux_admin.main import _is_test_only_follow_up_answer
+
+    assert not _is_test_only_follow_up_answer(
+        "Endpoint được cung cấp bởi nginx.service; không được restart."
+    )

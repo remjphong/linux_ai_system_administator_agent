@@ -153,6 +153,8 @@ def test_generic_slow_machine_request_never_guesses_a_service(app_config):
     assert "Không có hành động" in no_op["message"]
     assert no_op["problem_resolution"]["status"] == "diagnosis_only"
     assert no_op["problem_resolution"]["resolved"] is False
+    assert no_op["follow_up_question"] is not None
+    assert "ứng dụng" in no_op["follow_up_question"].casefold()
 
 
 def test_missing_or_inactive_service_does_not_propose_restart(app_config):
@@ -638,6 +640,32 @@ def test_pre_execution_audit_failure_is_not_hidden(
     assert restart.called is False
 
 
+def test_repair_request_for_unknown_endpoint_asks_for_service_context():
+    result = no_proposal_result(
+        "Khắc phục endpoint http://127.0.0.1:1/ không truy cập được",
+        [
+            (
+                "Diagnosis: Endpoint unreachable "
+                "(classification=endpoint_unreachable, confidence=high)."
+            ),
+            (
+                "Confirmed fact: A connection to 127.0.0.1:1 was refused "
+                "by the target endpoint."
+            ),
+            (
+                "Confirmed fact: Local socket inspection reported zero "
+                "listening sockets on 127.0.0.1:1 at inspection time."
+            ),
+        ],
+    )
+
+    question = result["follow_up_question"]
+    assert question is not None
+    assert "systemd unit" in question.casefold()
+    assert result["changes_made"] is False
+    assert result["problem_resolution"]["resolved"] is False
+
+
 def test_incomplete_investigation_is_not_labeled_diagnosis_only() -> None:
     for status in ("failed", "inconclusive"):
         result = no_proposal_result(
@@ -676,6 +704,7 @@ def test_no_proposal_result_uses_connection_refusal_evidence():
     assert "gateway" not in result["recommended_next_step"].casefold()
     assert "Không có hành động" in result["message"]
     assert "xácđịnh" not in result["message"]
+    assert result["follow_up_question"] is None
 
 def test_no_proposal_uses_empty_listener_evidence_for_refused_endpoint() -> None:
     from linux_admin.remediation_workflow import no_proposal_result
@@ -703,3 +732,4 @@ def test_no_proposal_uses_empty_listener_evidence_for_refused_endpoint() -> None
     assert "dịch vụ dự kiến cung cấp endpoint" in next_step
     assert "status và log" not in next_step
     assert result["changes_made"] is False
+    assert result["follow_up_question"] is None

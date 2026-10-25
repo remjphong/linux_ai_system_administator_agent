@@ -382,6 +382,277 @@ class RuleBasedPlanner:
         )
 
 
+
+class HybridPlanner:
+    """Route clear Linux tasks to deterministic rules and complex tasks to LLM."""
+
+    _RESEARCH_PHRASES = (
+        "search the web",
+        "search online",
+        "web search",
+        "official documentation",
+        "official docs",
+        "external sources",
+        "research online",
+        "tavily",
+        "tra cuu",
+        "tim kiem web",
+        "tim tren internet",
+        "tai lieu chinh thuc",
+        "tai lieu chinh thong",
+    )
+
+    _COMPLEX_PHRASES = (
+        "compare",
+        "comparison",
+        "correlate",
+        "correlation",
+        "across multiple",
+        "root cause across",
+        "architecture",
+        "design a plan",
+        "trade-off",
+        "tradeoff",
+        "so sanh",
+        "tuong quan",
+        "kien truc",
+        "thiet ke",
+        "phoi hop nhieu subsystem",
+        "nhieu subsystem",
+    )
+
+    _LOCAL_INTENT_PHRASES = (
+        "endpoint", "http", "tcp", "port",
+        "connection refused", "connection failed",
+        "service", "systemd", "daemon", "unit", "dich vu",
+        "log", "journal", "error", "exception", "crash",
+        "failure", "failed", "loi", "nhat ky",
+        "cpu", "processor", "memory", "ram", "swap",
+        "performance", "system health", "system overview",
+        "process", "processes", "slow", "cham", "bo nho",
+        "disk", "storage", "filesystem", "disk space",
+        "o dia", "dung luong dia", "o cung day",
+        "network", "internet", "wifi", "dns", "gateway",
+        "mang", "security", "permission", "privilege",
+        "authentication", "unauthorized", "firewall",
+        "bao mat", "quyen truy cap", "xac thuc",
+    )
+
+    def __init__(
+        self,
+        config: AppConfig,
+        rule_planner: RuleBasedPlanner,
+        llm_planner: Planner,
+    ) -> None:
+        self._config = config
+        self._rule_planner = rule_planner
+        self._llm_planner = llm_planner
+
+    @staticmethod
+    def _urls_in_request(request: str) -> list[str]:
+        raw_urls = re.findall(r"https?://\S+", request, re.IGNORECASE)
+        return list(dict.fromkeys(
+            url.rstrip(".,;:!?)]}")
+            for url in raw_urls
+        ))
+
+    @classmethod
+    def _research_requested(cls, normalized: str) -> bool:
+        return any(
+            phrase in normalized for phrase in cls._RESEARCH_PHRASES
+        )
+
+    @staticmethod
+    def _search_query(request: str, normalized: str) -> str:
+        error_match = re.search(
+            r"\b[A-Za-z][A-Za-z0-9_]*(?:Error|Exception)\b",
+            request,
+        )
+        if error_match:
+            return (
+                f"official documentation {error_match.group(0)} "
+                "Python errno ECONNREFUSED Linux connect system call"
+            )
+
+        service_name = RuleBasedPlanner._explicit_service_name_from_request(
+            request
+        )
+        if service_name:
+            return (
+                f"official systemd documentation {service_name} "
+                "service status logs troubleshooting"
+            )
+
+        if RuleBasedPlanner._looks_like_disk_pressure(normalized):
+            return "official Linux documentation filesystem disk space troubleshooting"
+
+        if RuleBasedPlanner._contains_any(
+            normalized, ("cpu", "memory", "ram", "swap", "performance", "bo nho")
+        ):
+            return "official Linux documentation CPU memory performance troubleshooting"
+
+        if RuleBasedPlanner._contains_any(
+            normalized, ("network", "internet", "wifi", "dns", "gateway", "mang")
+        ):
+            return "official Linux documentation network DNS connectivity troubleshooting"
+
+        if RuleBasedPlanner._contains_any(
+            normalized, ("security", "permission", "firewall", "bao mat", "quyen")
+        ):
+            return "official Linux documentation security permissions troubleshooting"
+
+        if RuleBasedPlanner._contains_any(
+            normalized, ("log", "journal", "error", "exception", "loi", "nhat ky")
+        ):
+            return "official Linux documentation system journal error troubleshooting"
+
+        return "official Linux documentation troubleshooting"
+
+    def create_plan(
+        self,
+        user_request: str,
+        available_tools: Sequence[ToolSpec],
+    ) -> AgentPlan:
+        normalized = RuleBasedPlanner._normalize_request(user_request)
+        urls = self._urls_in_request(user_request)
+        service_name = RuleBasedPlanner._explicit_service_name_from_request(
+            user_request
+        )
+        research_requested = self._research_requested(normalized)
+
+        complex_request = (
+            len(urls) > 1
+            or any(
+                phrase in normalized
+                for phrase in self._COMPLEX_PHRASES
+            )
+        )
+        local_action_requested = any(
+            phrase in normalized
+            for phrase in (
+                "check", "inspect", "investigate", "diagnose",
+                "probe", "measure", "collect evidence", "local evidence",
+                "check status", "check logs", "inspect logs", "read logs",
+                "kiem tra", "dieu tra", "chan doan",
+                "thu thap bang chung", "kiem tra trang thai",
+                "kiem tra ket noi", "kiem tra tai nguyen",
+                "doc log", "doc nhat ky", "xem trang thai",
+            )
+        )
+        local_topic_requested = any(
+            phrase in normalized
+            for phrase in self._LOCAL_INTENT_PHRASES
+        )
+
+        # A search request mentioning a topic such as DNS is not by itself
+        # a request to inspect the local machine.
+        web_only_request = (
+            research_requested
+            and not urls
+            and not local_action_requested
+        )
+        local_action_requested = any(
+            phrase in normalized
+            for phrase in (
+                "check", "inspect", "investigate", "diagnose",
+                "probe", "measure", "collect evidence", "local evidence",
+                "check status", "check logs", "inspect logs", "read logs",
+                "kiem tra", "dieu tra", "chan doan",
+                "thu thap bang chung", "kiem tra trang thai",
+                "kiem tra ket noi", "kiem tra tai nguyen",
+                "doc log", "doc nhat ky", "xem trang thai",
+            )
+        )
+        local_topic_requested = any(
+            phrase in normalized
+            for phrase in self._LOCAL_INTENT_PHRASES
+        )
+        web_only_request = (
+            research_requested
+            and not urls
+            and service_name is None
+            and not local_action_requested
+        )
+        clear_local_intent = (
+            len(urls) == 1
+            or (
+                not web_only_request
+                and (
+                    service_name is not None
+                    or (
+                        local_topic_requested
+                        and (
+                            local_action_requested
+                            or not research_requested
+                        )
+                    )
+                )
+            )
+        )
+
+        # Let the LLM handle ambiguous or explicitly comparative/multi-system tasks.
+        if complex_request or (
+            not clear_local_intent and not research_requested
+        ):
+            return self._llm_planner.create_plan(
+                user_request, available_tools
+            )
+
+        if clear_local_intent:
+            base_plan = self._rule_planner.create_plan(
+                user_request, available_tools
+            )
+            steps = list(base_plan.steps)
+            rationale = base_plan.rationale
+        else:
+            steps = []
+            rationale = (
+                "External research request routed directly to the registered "
+                "read-only web-search tool."
+            )
+
+        available_names = {
+            spec.name
+            for spec in available_tools
+            if not spec.changes_system
+        }
+        max_steps = max(1, self._config.agent.max_steps)
+
+        if research_requested:
+            if "tavily_web_search" not in available_names:
+                rationale += (
+                    " Tavily search was requested but is not available "
+                    "in the registered tool catalog."
+                )
+            elif not any(
+                step.tool_name == "tavily_web_search" for step in steps
+            ):
+                search_step = PlanStep(
+                    "tavily_web_search",
+                    {"query": self._search_query(user_request, normalized)},
+                    "Find external documentation; do not treat it as local evidence",
+                )
+
+                # Reserve a step for Tavily only if the configured budget allows
+                # both local evidence collection and external search.
+                if not clear_local_intent:
+                    steps = [search_step]
+                elif max_steps >= 2:
+                    if len(steps) >= max_steps:
+                        steps = steps[:max_steps - 1]
+                    steps.append(search_step)
+                else:
+                    rationale += (
+                        " Tavily was not added because max_steps=1 cannot "
+                        "include both local diagnosis and external research."
+                    )
+
+        return AgentPlan(
+            steps=tuple(steps[:max_steps]),
+            rationale=rationale,
+        )
+
+
 class Agent:
     """Run a bounded investigation using registered read-only tools.
 
@@ -413,18 +684,20 @@ class Agent:
             # Explicitly injected planners remain available for tests/integrations.
             self.planner = planner
         elif config.llm.enabled and config.llm.planning_mode == "llm":
-            # LLM planning is opt-in: local CPU inference must not sit on the
-            # critical path unless the operator explicitly selects it.
             llm_client = OpenAICompatibleLLMClient(config.llm)
-            self.planner = llm_client
+            rule_planner = RuleBasedPlanner(config)
+            self.planner = HybridPlanner(
+                config=config,
+                rule_planner=rule_planner,
+                llm_planner=llm_client,
+            )
             if config.llm.summary_enabled:
                 self._llm_client = llm_client
             if config.llm.fallback_to_rules:
-                self._fallback_planner = RuleBasedPlanner(config)
+                self._fallback_planner = rule_planner
         else:
-            # Default is deterministic rules-first triage. The LLM is only
-            # initialized for optional post-investigation summaries when enabled.
-            self.planner = RuleBasedPlanner(config)
+            rule_planner = RuleBasedPlanner(config)
+            self.planner = rule_planner
             if config.llm.enabled and config.llm.summary_enabled:
                 self._llm_client = OpenAICompatibleLLMClient(config.llm)
 

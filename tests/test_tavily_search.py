@@ -108,3 +108,117 @@ def test_tavily_tool_is_registered_only_when_enabled(app_config: AppConfig) -> N
     )
     enabled_registry = register_builtin_tools(ToolRegistry(), enabled_config)
     assert enabled_registry.get_spec("tavily_web_search") is not None
+
+
+
+def test_tavily_prioritizes_results_matching_technical_error_terms(
+    app_config: AppConfig, monkeypatch
+) -> None:
+    settings = replace(
+        app_config.tavily,
+        enabled=True,
+        api_key="tvly-unit-test-key",
+        max_results=3,
+    )
+    tool = TavilyWebSearchTool(settings)
+    query = (
+        "official documentation ConnectionRefusedError Python errno "
+        "ECONNREFUSED Linux connect system call"
+    )
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self, limit: int) -> bytes:
+            return json.dumps(
+                {
+                    "results": [
+                        {
+                            "title": "Python errno documentation",
+                            "url": "https://docs.python.org/3/library/errno.html",
+                            "content": (
+                                "ECONNREFUSED maps to ConnectionRefusedError."
+                            ),
+                            "score": 0.70,
+                        },
+                        {
+                            "title": "Python changelog",
+                            "url": "https://docs.python.org/3/whatsnew/changelog.html",
+                            "content": "Unrelated release changes.",
+                            "score": 0.95,
+                        },
+                        {
+                            "title": "Another release changelog",
+                            "url": "https://docs.python.org/3.13/whatsnew/changelog.html",
+                            "content": "More unrelated release changes.",
+                            "score": 0.90,
+                        },
+                    ]
+                }
+            ).encode()
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: FakeResponse(),
+    )
+
+    result = tool.execute(query=query, max_results=3)
+
+    assert result.ok is True
+    assert result.data["result_count"] == 1
+    assert result.data["results"][0]["title"] == "Python errno documentation"
+    assert "ConnectionRefusedError" in result.data["results"][0]["content"]
+    assert result.data["untrusted_external_content"] is True
+
+
+def test_tavily_keeps_results_when_no_exact_technical_match_exists(
+    app_config: AppConfig, monkeypatch
+) -> None:
+    settings = replace(
+        app_config.tavily,
+        enabled=True,
+        api_key="tvly-unit-test-key",
+        max_results=2,
+    )
+    tool = TavilyWebSearchTool(settings)
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self, limit: int) -> bytes:
+            return json.dumps(
+                {
+                    "results": [
+                        {
+                            "title": "General Linux networking guide",
+                            "url": "https://example.com/linux-networking",
+                            "content": "General networking reference.",
+                            "score": 0.8,
+                        }
+                    ]
+                }
+            ).encode()
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: FakeResponse(),
+    )
+
+    result = tool.execute(
+        query="ConnectionRefusedError",
+        max_results=2,
+    )
+
+    assert result.ok is True
+    assert result.data["result_count"] == 1
+    assert result.data["results"][0]["title"] == (
+        "General Linux networking guide"
+    )

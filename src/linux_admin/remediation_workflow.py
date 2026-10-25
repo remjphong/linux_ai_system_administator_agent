@@ -165,6 +165,7 @@ def no_proposal_result(
         for marker in (
             "kiểm tra", "phân tích", "mạng", "dịch vụ", "lỗi",
             "bảo mật", "ổ đĩa", "nhật ký", "máy", "tại sao",
+            "khắc phục", "sửa lỗi", "không truy cập được",
         )
     )
 
@@ -395,10 +396,111 @@ def no_proposal_result(
                 "subsystem context, and rerun the investigation before proposing changes."
             )
 
+    # Ask for missing diagnostic context only when it can help continue
+    # an investigation. A check-only request must not be pushed into remediation.
+    follow_up_question = None
+    if investigation_status == "completed":
+        repair_phrases = (
+            "khắc phục", "sửa lỗi", "sửa chữa", "khởi động lại",
+            "restart", "fix", "repair", "restore", "recover", "resolve",
+        )
+        check_only_phrases = (
+            "kiểm tra endpoint", "kiểm tra trạng thái",
+            "kiểm tra kết nối", "có truy cập được không",
+            "có hoạt động không", "chỉ kiểm tra", "chỉ phân tích",
+            "check endpoint", "check status", "check connectivity",
+            "check whether", "check if", "is it reachable",
+            "is it accessible", "is it working", "what is the status",
+            "only check", "just check", "read-only",
+        )
+        explicit_repair = any(
+            phrase in folded for phrase in repair_phrases
+        )
+        explicitly_check_only = (
+            any(phrase in folded for phrase in _NO_CHANGE_PHRASES)
+            or (
+                not explicit_repair
+                and any(phrase in folded for phrase in check_only_phrases)
+            )
+        )
+
+        if not explicitly_check_only:
+            if is_vietnamese:
+                if classification == "endpoint_unreachable":
+                    if refused_target:
+                        follow_up_question = (
+                            f"Endpoint {refused_target} dự kiến do ứng dụng "
+                            "hoặc systemd unit nào cung cấp?"
+                        )
+                    else:
+                        follow_up_question = (
+                            "Endpoint hoặc ứng dụng cụ thể nào đang bị ảnh hưởng?"
+                        )
+                elif classification == "service_missing":
+                    follow_up_question = (
+                        "Tên systemd unit này có chính xác không, và dịch vụ "
+                        "có được kỳ vọng cài đặt trên máy này không?"
+                    )
+                elif classification == "resource_pressure":
+                    follow_up_question = (
+                        "Hiện tượng chậm bắt đầu từ khi nào và ứng dụng nào "
+                        "bị ảnh hưởng rõ nhất?"
+                    )
+                elif classification == "service_inventory_failed":
+                    follow_up_question = (
+                        "Dịch vụ nào trong danh sách failed liên quan trực tiếp "
+                        "đến sự cố ban đầu?"
+                    )
+                elif classification in {
+                    "http_server_error", "http_client_error"
+                }:
+                    follow_up_question = (
+                        "Ứng dụng hoặc systemd unit nào dự kiến cung cấp endpoint này?"
+                    )
+                else:
+                    follow_up_question = (
+                        "Triệu chứng cụ thể nào vẫn còn xảy ra và ứng dụng "
+                        "hoặc dịch vụ nào bị ảnh hưởng?"
+                    )
+            else:
+                if classification == "endpoint_unreachable":
+                    if refused_target:
+                        follow_up_question = (
+                            f"Which application or systemd unit is expected "
+                            f"to provide endpoint {refused_target}?"
+                        )
+                    else:
+                        follow_up_question = (
+                            "Which specific endpoint or application is affected?"
+                        )
+                elif classification == "service_missing":
+                    follow_up_question = (
+                        "Is this systemd unit name correct, and should the "
+                        "service be installed on this host?"
+                    )
+                elif classification == "resource_pressure":
+                    follow_up_question = (
+                        "When did the slowdown begin, and which application "
+                        "is most affected?"
+                    )
+                elif classification in {
+                    "http_server_error", "http_client_error"
+                }:
+                    follow_up_question = (
+                        "Which application or systemd unit is expected to "
+                        "provide this endpoint?"
+                    )
+                else:
+                    follow_up_question = (
+                        "What specific symptom remains, and which application "
+                        "or service is affected?"
+                    )
+
     return {
         "status": "not_proposed",
         "message": message,
         "recommended_next_step": next_step,
+        "follow_up_question": follow_up_question,
         "changes_made": False,
         "problem_resolution": problem_resolution,
     }

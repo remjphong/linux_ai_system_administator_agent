@@ -122,6 +122,89 @@ def _investigation_exit_code(
     return int(remediation_status in failed_remediation_statuses)
 
 
+def _extract_external_references(evidence: list[Any]) -> list[dict[str, Any]]:
+    """Extract bounded, validated Tavily references from tool evidence."""
+    from urllib.parse import urlsplit
+
+    references: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+
+    for result in evidence:
+        if len(references) >= 5:
+            break
+        if getattr(result, "tool_name", None) != "tavily_web_search":
+            continue
+        if not getattr(result, "ok", False):
+            continue
+
+        data = getattr(result, "data", None)
+        if not isinstance(data, dict):
+            continue
+
+        items = data.get("results")
+        if not isinstance(items, list):
+            continue
+
+        source = data.get("source")
+        if not isinstance(source, str) or not source.strip():
+            source = "Tavily Search API"
+
+        for item in items:
+            if len(references) >= 5:
+                break
+            if not isinstance(item, dict):
+                continue
+
+            title = item.get("title")
+            url = item.get("url")
+            content = item.get("content", "")
+            score = item.get("score")
+
+            if (
+                not isinstance(title, str)
+                or not title.strip()
+                or not isinstance(url, str)
+                or len(url) > 2048
+            ):
+                continue
+
+            try:
+                parsed_url = urlsplit(url)
+                valid_url = (
+                    parsed_url.scheme in {"https", "http"}
+                    and bool(parsed_url.hostname)
+                    and parsed_url.username is None
+                    and parsed_url.password is None
+                )
+            except ValueError:
+                valid_url = False
+
+            if not valid_url or url in seen_urls:
+                continue
+
+            if not isinstance(content, str):
+                content = ""
+            if (
+                isinstance(score, bool)
+                or not isinstance(score, (int, float))
+            ):
+                score = None
+
+            seen_urls.add(url)
+            references.append(
+                {
+                    "title": title.strip()[:200],
+                    "url": url,
+                    "snippet": content.strip()[:1200],
+                    "score": score,
+                    "source": source.strip()[:100],
+                    "untrusted_external_content": True,
+                }
+            )
+
+    return references
+
+
 def _incident_to_dict(incident: IncidentContext) -> dict[str, Any]:
     """Convert an incident result into JSON-compatible data for the CLI."""
     return {
@@ -131,8 +214,123 @@ def _incident_to_dict(incident: IncidentContext) -> dict[str, Any]:
         "steps": incident.steps,
         "findings": incident.findings,
         "evidence": [result.to_dict() for result in incident.evidence],
+        "external_references": _extract_external_references(incident.evidence),
         "started_at": incident.started_at.isoformat(),
     }
+
+
+
+
+def _run_investigation(
+    agent: Agent,
+    request: str,
+    config: Any,
+    registry: ToolRegistry,
+    audit: AuditLogger | None,
+) -> dict[str, Any]:
+    """Run one investigation and its existing remediation workflow."""
+    incident = agent.run(request)
+    output = _incident_to_dict(incident)
+    proposal = build_remediation_proposal(incident, config, registry)
+
+    verification_url, endpoint_verification_required = (
+        _select_verification_target(request)
+    )
+
+    if proposal is None:
+        output["remediation"] = no_proposal_result(
+            request,
+            incident.findings,
+            investigation_status=incident.status,
+        )
+    else:
+        output["remediation"] = run_remediation_workflow(
+            proposal,
+            incident_id=incident.incident_id,
+            config=config,
+            registry=registry,
+            audit=audit,
+            diagnosis_findings=incident.findings,
+            verification_url=verification_url,
+            endpoint_verification_required=endpoint_verification_required,
+            output_fn=lambda message: print(message, file=sys.stderr),
+        )
+
+    return output
+
+
+def _read_follow_up_answer(question: str) -> str | None:
+    """Ask one clarification only in a fully interactive terminal."""
+    try:
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, OSError):
+        interactive = False
+
+    if not interactive:
+        return None
+
+    print(
+        f"\nCần làm rõ trước khi tiếp tục:\n{question}",
+        file=sys.stderr,
+    )
+    print(
+        "Thông tin bổ sung (nhấn Enter để bỏ qua): ",
+        end="",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    try:
+        answer = sys.stdin.readline()
+    except (EOFError, KeyboardInterrupt, OSError):
+        return None
+
+    answer = answer.strip()
+    return answer or None
+
+
+
+def _is_unknown_follow_up_answer(answer: str) -> bool:
+    """Identify answers that provide no additional diagnostic context."""
+    normalized = " ".join(answer.casefold().split()).strip(" .,!?:;")
+    return normalized in {
+        "không xác định",
+        "chưa xác định",
+        "không xác định được",
+        "chưa xác định được",
+        "không biết",
+        "chưa biết",
+        "chưa rõ",
+        "không rõ",
+        "unknown",
+        "not sure",
+        "i don't know",
+        "i do not know",
+        "dont know",
+        "idk",
+        "n/a",
+    }
+
+
+
+def _is_test_only_follow_up_answer(answer: str) -> bool:
+    """Detect clarification explicitly marked as hypothetical or test-only."""
+    normalized = " ".join(answer.casefold().split())
+    markers = (
+        "chỉ dùng để kiểm thử",
+        "chỉ để kiểm thử",
+        "chỉ dùng cho mục đích kiểm thử",
+        "tên unit giả lập",
+        "unit giả lập",
+        "giả lập",
+        "for testing only",
+        "for test purposes only",
+        "hypothetical",
+        "simulated unit",
+        "test-only",
+        "test only",
+    )
+    return any(marker in normalized for marker in markers)
 
 
 def main() -> int:
@@ -190,39 +388,53 @@ def main() -> int:
 
         if args.investigate:
             agent = Agent(registry=registry, config=config, audit=audit_logger)
-            incident = agent.run(args.investigate)
-            output = _incident_to_dict(incident)
-            proposal = build_remediation_proposal(incident, config, registry)
+            output = _run_investigation(
+                agent, args.investigate, config, registry, audit_logger
+            )
 
-            (
-                verification_url,
-                endpoint_verification_required,
-            ) = _select_verification_target(args.investigate)
+            question = output["remediation"].get("follow_up_question")
+            answer = _read_follow_up_answer(question) if question else None
 
-            if proposal is None:
-                output["remediation"] = no_proposal_result(
-                    args.investigate,
-                    incident.findings,
-                    investigation_status=incident.status,
-                )
-            else:
-                output["remediation"] = run_remediation_workflow(
-                    proposal,
-                    incident_id=incident.incident_id,
-                    config=config,
-                    registry=registry,
-                    audit=audit_logger,
-                    diagnosis_findings=incident.findings,
-                    verification_url=verification_url,
-                    endpoint_verification_required=endpoint_verification_required,
-                    output_fn=lambda message: print(message, file=sys.stderr),
-                )
+            if answer:
+                previous_incident_id = output["incident_id"]
+
+                unknown_answer = _is_unknown_follow_up_answer(answer)
+                test_only_answer = _is_test_only_follow_up_answer(answer)
+
+                if unknown_answer or test_only_answer:
+                    # Do not investigate unknown or explicitly hypothetical
+                    # targets as if they were real services.
+                    output["remediation"]["follow_up_question"] = None
+                    output["clarification"] = {
+                        "answered": True,
+                        "status": (
+                            "insufficient_context"
+                            if unknown_answer
+                            else "non_operational_example"
+                        ),
+                        "previous_incident_id": previous_incident_id,
+                        "answer": answer,
+                        "context_provided": False,
+                    }
+                else:
+                    clarified_request = (
+                        f"{args.investigate}\n\n"
+                        f"Additional operator context: {answer}"
+                    )
+                    output = _run_investigation(
+                        agent, clarified_request, config, registry, audit_logger
+                    )
+                    output["clarification"] = {
+                        "answered": True,
+                        "status": "context_added",
+                        "previous_incident_id": previous_incident_id,
+                        "answer": answer,
+                        "context_provided": True,
+                    }
 
             print(json.dumps(output, ensure_ascii=False, indent=2))
-            remediation_status = output["remediation"]["status"]
             return _investigation_exit_code(
-                incident.status,
-                remediation_status,
+                output["status"], output["remediation"]["status"]
             )
 
         if args.restart_service:

@@ -7,6 +7,7 @@ never be treated as instructions or proof of local machine state.
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -18,6 +19,107 @@ from linux_admin.contracts import ToolResult, ToolSpec
 _TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 _MAX_RESPONSE_BYTES = 1_000_000
 _MAX_RESULT_TEXT_CHARS = 1_200
+
+
+def _rank_search_results(
+    query: str,
+    results: list[dict[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Rank search results by query relevance without treating them as evidence."""
+    terms = list(
+        dict.fromkeys(
+            token.casefold()
+            for token in re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", query)
+        )
+    )
+    # Match actual exception names and errno-style identifiers only.
+    # Generic words such as "documentation" must not count as technical IDs.
+    technical_terms = {
+        token.casefold()
+        for pattern in (
+            r"\b[A-Z][a-zA-Z0-9]*(?:Error|Exception)\b",
+            r"\bE[A-Z0-9_]{3,}\b",
+        )
+        for token in re.findall(pattern, query)
+    }
+    stop_words = {
+        "official", "documentation", "document", "docs",
+        "about", "with", "from", "that", "this", "the",
+        "and", "for", "how", "use", "using",
+    }
+    ranking_terms = [term for term in terms if term not in stop_words]
+
+    def searchable_text(item: dict[str, Any]) -> str:
+        return " ".join(
+            str(item.get(field, ""))
+            for field in ("title", "url", "content")
+        ).casefold()
+
+    # If the query contains specific technical identifiers and at least one
+    # result mentions one, prefer that subset over unrelated generic pages.
+    if technical_terms:
+        directly_relevant = [
+            item
+            for item in results
+            if any(term in searchable_text(item) for term in technical_terms)
+        ]
+        if directly_relevant:
+            candidates = directly_relevant
+        else:
+            candidates = results
+    else:
+        candidates = results
+
+    release_markers = (
+        "changelog", "release notes", "release history", "what's new",
+    )
+
+    def rank(item: dict[str, Any]) -> float:
+        title = str(item.get("title", "")).casefold()
+        content = str(item.get("content", "")).casefold()
+        url = str(item.get("url", "")).casefold()
+        combined = f"{title} {url} {content}"
+
+        if ranking_terms:
+            title_ratio = sum(
+                term in title for term in ranking_terms
+            ) / len(ranking_terms)
+            body_ratio = sum(
+                term in f"{url} {content}" for term in ranking_terms
+            ) / len(ranking_terms)
+        else:
+            title_ratio = 0.0
+            body_ratio = 0.0
+
+        score = item.get("score")
+        if (
+            isinstance(score, bool)
+            or not isinstance(score, (int, float))
+        ):
+            score = 0.0
+        score = max(0.0, min(1.0, float(score)))
+
+        relevance = (
+            score * 0.25
+            + title_ratio * 0.45
+            + body_ratio * 0.30
+        )
+
+        technical_match = any(
+            term in combined for term in technical_terms
+        )
+        if (
+            any(marker in title for marker in release_markers)
+            and technical_terms
+            and not technical_match
+        ):
+            relevance -= 0.30
+
+        return relevance
+
+    ranked = sorted(candidates, key=rank, reverse=True)
+    return ranked[:limit]
 
 
 class TavilyWebSearchTool:
@@ -95,6 +197,16 @@ class TavilyWebSearchTool:
             "include_answer": False,
             "include_raw_content": False,
         }
+
+        if "official documentation" in query.casefold():
+            payload["include_domains"] = [
+                "docs.python.org",
+                "man7.org",
+                "docs.kernel.org",
+                "freedesktop.org",
+                "docs.ubuntu.com",
+            ]
+            payload["include_domains_mode"] = "restrict"
         request = urllib.request.Request(
             _TAVILY_SEARCH_URL,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -194,13 +306,16 @@ class TavilyWebSearchTool:
                 }
             )
 
+        ranked_results = _rank_search_results(
+            query.strip(), results, requested_results
+        )
         return ToolResult(
             tool_name=self.spec.name,
             status="success",
             data={
                 "query": query.strip(),
-                "result_count": len(results),
-                "results": results,
+                "result_count": len(ranked_results),
+                "results": ranked_results,
                 "source": "Tavily Search API",
                 "untrusted_external_content": True,
             },

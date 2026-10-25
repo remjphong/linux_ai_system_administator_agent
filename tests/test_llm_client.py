@@ -259,7 +259,7 @@ def test_agent_falls_back_to_rules_when_llm_planning_fails(
     monkeypatch.setattr("linux_admin.agent.OpenAICompatibleLLMClient", BrokenLLM)
     incident = Agent(
         registry=registry_factory(), config=llm_config, audit=audit_logger
-    ).run("Investigate service failure for demo-web.service")
+    ).run("Compare the root cause across multiple subsystems for demo-web.service")
 
     assert incident.status == "completed"
     assert any("rule-based read-only fallback" in item for item in incident.findings)
@@ -349,3 +349,158 @@ def test_tool_selection_includes_tavily_for_external_research():
     assert "get_system_overview" in local_names
     assert "tavily_web_search" not in local_names
 
+
+
+def _hybrid_planning_tools(*, include_tavily: bool = True) -> list[ToolSpec]:
+    """Build a small offline tool catalog for hybrid-planner tests."""
+    tools = [
+        ToolSpec(
+            name="check_tcp_connectivity",
+            description="Check TCP connectivity without changing the system",
+        ),
+        ToolSpec(
+            name="check_http_endpoint",
+            description="Check an explicitly provided HTTP endpoint",
+            parameters={
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"],
+                "additionalProperties": False,
+            },
+        ),
+        ToolSpec(
+            name="restart_service",
+            description="Restart a system service",
+            risk_level="high",
+            changes_system=True,
+            requires_approval=True,
+        ),
+    ]
+
+    if include_tavily:
+        tools.append(
+            ToolSpec(
+                name="tavily_web_search",
+                description="Search public web documentation",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "max_results": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 3,
+                        },
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            )
+        )
+
+    return tools
+
+
+def test_hybrid_plan_uses_explicit_url_and_tavily_without_llm(
+    app_config, monkeypatch
+) -> None:
+    client = _client(app_config)
+
+    def unexpected_llm_call(*args, **kwargs):
+        pytest.fail("Explicit single-URL hybrid planning must not call the LLM")
+
+    monkeypatch.setattr(client, "_chat", unexpected_llm_call)
+
+    plan = client.create_plan(
+        "Kiểm tra HTTP endpoint http://127.0.0.1:1/. "
+        "Tra cứu tài liệu chính thức về ConnectionRefusedError bằng Tavily.",
+        _hybrid_planning_tools(),
+    )
+
+    assert [step.tool_name for step in plan.steps] == [
+        "check_http_endpoint",
+        "tavily_web_search",
+    ]
+    assert plan.steps[0].arguments == {
+        "url": "http://127.0.0.1:1/"
+    }
+    assert "ConnectionRefusedError" in plan.steps[1].arguments["query"]
+    assert all(step.tool_name != "restart_service" for step in plan.steps)
+
+
+def test_hybrid_plan_without_web_request_uses_only_http(
+    app_config, monkeypatch
+) -> None:
+    client = _client(app_config)
+
+    def unexpected_llm_call(*args, **kwargs):
+        pytest.fail("Explicit single-URL planning must not call the LLM")
+
+    monkeypatch.setattr(client, "_chat", unexpected_llm_call)
+
+    plan = client.create_plan(
+        "Kiểm tra endpoint HTTP http://127.0.0.1:1/.",
+        _hybrid_planning_tools(),
+    )
+
+    assert len(plan.steps) == 1
+    assert plan.steps[0].tool_name == "check_http_endpoint"
+    assert plan.steps[0].arguments["url"] == "http://127.0.0.1:1/"
+
+
+def test_multiple_urls_fall_back_to_llm_planning(
+    app_config, monkeypatch
+) -> None:
+    client = _client(app_config)
+    calls = []
+
+    def fake_chat(
+        system_prompt,
+        user_prompt,
+        *,
+        max_output_tokens=None,
+        json_mode=False,
+    ):
+        calls.append(user_prompt)
+        return json.dumps(
+            {
+                "rationale": "Compare the explicitly requested endpoints.",
+                "steps": [
+                    {
+                        "tool_name": "check_http_endpoint",
+                        "arguments": {"url": "http://127.0.0.1:1/"},
+                        "purpose": "Check the first endpoint.",
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(client, "_chat", fake_chat)
+
+    plan = client.create_plan(
+        "Compare http://127.0.0.1:1/ and http://127.0.0.1:2/.",
+        _hybrid_planning_tools(),
+    )
+
+    assert len(calls) == 1
+    assert plan.steps[0].tool_name == "check_http_endpoint"
+    assert plan.steps[0].arguments["url"] == "http://127.0.0.1:1/"
+
+
+def test_hybrid_plan_does_not_invent_unregistered_tavily_tool(
+    app_config, monkeypatch
+) -> None:
+    client = _client(app_config)
+
+    def unexpected_llm_call(*args, **kwargs):
+        pytest.fail("The explicit URL fast path should remain deterministic")
+
+    monkeypatch.setattr(client, "_chat", unexpected_llm_call)
+
+    plan = client.create_plan(
+        "Kiểm tra http://127.0.0.1:1/ và tra cứu tài liệu chính thức.",
+        _hybrid_planning_tools(include_tavily=False),
+    )
+
+    assert [step.tool_name for step in plan.steps] == ["check_http_endpoint"]
+    assert "Tavily không khả dụng" in plan.rationale
