@@ -152,16 +152,30 @@ def test_explicit_service_status_and_logs_use_rules(app_config):
     assert llm.calls == 0
 
 
-def test_multiple_urls_are_delegated_to_llm(app_config):
-    planner, llm, tools = _hybrid(app_config)
+def test_multiple_urls_use_deterministic_read_only_plan(app_config):
+    planner, _llm, tools = _hybrid(app_config)
 
+    urls = [
+        "http://127.0.0.1:1/",
+        "http://127.0.0.1:2/",
+    ]
     plan = planner.create_plan(
-        "Compare http://127.0.0.1:1/ and http://127.0.0.1:2/",
+        f"Compare {urls[0]} and {urls[1]}",
         tools,
     )
 
-    assert plan.rationale == "Fake LLM plan"
-    assert llm.calls == 1
+    http_steps = [
+        step for step in plan.steps
+        if step.tool_name == "check_http_endpoint"
+    ]
+    assert [step.arguments.get("url") for step in http_steps] == urls
+    assert plan.rationale.startswith("Deterministic multi-endpoint plan:")
+
+    read_only_names = {
+        tool.name for tool in tools if not tool.changes_system
+    }
+    assert all(step.tool_name in read_only_names for step in plan.steps)
+    assert len(plan.steps) <= max(1, app_config.agent.max_steps)
 
 
 def test_web_only_request_uses_tavily_without_llm(app_config):

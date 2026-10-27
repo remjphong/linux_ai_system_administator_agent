@@ -396,6 +396,51 @@ def no_proposal_result(
                 "subsystem context, and rerun the investigation before proposing changes."
             )
 
+    # For multi-endpoint comparisons, preserve the concrete diagnostic
+    # recommendation instead of using the generic classification default.
+    requested_urls = {
+        item.rstrip(".,;:!?)]}")
+        for item in re.findall(
+            r"""https?://[^\s"'<>]+""",
+            folded,
+            re.IGNORECASE,
+        )
+    }
+    diagnostic_next_checks = [
+        finding.split(":", 1)[1].strip()
+        for finding in findings
+        if finding.casefold().startswith("recommended next check:")
+        and finding.split(":", 1)[1].strip()
+    ]
+
+    if (
+        investigation_status == "completed"
+        and classification == "endpoint_unreachable"
+        and len(requested_urls) > 1
+        and diagnostic_next_checks
+    ):
+        selected_next_check = diagnostic_next_checks[0]
+        if is_vietnamese:
+            listener_match = re.search(
+                r"listener on ([^\\s,]+)",
+                selected_next_check,
+                re.IGNORECASE,
+            )
+            if listener_match:
+                target = listener_match.group(1)
+                next_step = (
+                    f"Kiểm tra listener tại {target}, sau đó xác định dịch vụ "
+                    "dự kiến cung cấp endpoint từ cấu hình ứng dụng hoặc "
+                    "deployment. Không tự động restart dịch vụ chưa xác định."
+                )
+            else:
+                next_step = (
+                    "Thực hiện bước kiểm tra tiếp theo được nêu trong chẩn đoán: "
+                    f"{selected_next_check}"
+                )
+        else:
+            next_step = selected_next_check
+
     # Ask for missing diagnostic context only when it can help continue
     # an investigation. A check-only request must not be pushed into remediation.
     follow_up_question = None

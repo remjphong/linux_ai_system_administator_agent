@@ -85,6 +85,162 @@ def diagnose_incident(
     http_data = _last_success_data(http_results)
     service_data = _last_success_data(service_results)
 
+    # Multi-endpoint diagnosis aggregates every observed host/port pair.
+    # Do not reduce a comparison to only the last successful tool result.
+    endpoint_observations: dict[tuple[str, int], dict[str, object]] = {}
+
+    for kind, results in (
+        ("http", http_results),
+        ("tcp", tcp_results),
+    ):
+        for result in results:
+            if not result.ok or not isinstance(result.data, dict):
+                continue
+
+            data = result.data
+            host = data.get("host")
+            port = data.get("port")
+            if not isinstance(host, str) or type(port) is not int:
+                continue
+
+            entry = endpoint_observations.setdefault(
+                (host, port),
+                {"host": host, "port": port, "http": [], "tcp": []},
+            )
+            observations = entry[kind]
+            if isinstance(observations, list):
+                observations.append(data)
+
+    listener_by_port: dict[int, dict[str, object]] = {}
+    for result in by_tool.get("inspect_listening_port", []):
+        if not result.ok or not isinstance(result.data, dict):
+            continue
+        data = result.data
+        port = data.get("port")
+        if (
+            type(port) is int
+            and data.get("supported") is True
+            and isinstance(data.get("count"), int)
+            and not isinstance(data.get("count"), bool)
+            and isinstance(data.get("listeners"), list)
+        ):
+            listener_by_port[port] = data
+
+    def entry_is_unreachable(entry: dict[str, object]) -> bool:
+        for kind in ("http", "tcp"):
+            records = entry.get(kind, [])
+            if isinstance(records, list) and any(
+                isinstance(record, dict)
+                and record.get("reachable") is False
+                for record in records
+            ):
+                return True
+        return False
+
+    if len(endpoint_observations) > 1:
+        unreachable_count = sum(
+            entry_is_unreachable(entry)
+            for entry in endpoint_observations.values()
+        )
+
+        if unreachable_count:
+            facts: list[str] = []
+            hypotheses: list[str] = []
+            next_checks: list[str] = []
+
+            for (host, port), entry in endpoint_observations.items():
+                http_records = entry.get("http", [])
+                tcp_records = entry.get("tcp", [])
+                http_records = http_records if isinstance(http_records, list) else []
+                tcp_records = tcp_records if isinstance(tcp_records, list) else []
+                label = f"{host}:{port}"
+
+                for data in http_records:
+                    if not isinstance(data, dict):
+                        continue
+                    url = data.get("url")
+                    target = url if isinstance(url, str) else label
+                    if data.get("reachable") is False:
+                        error = data.get("error_type") or "connection failure"
+                        facts.append(
+                            f"HTTP probe for {target} failed with {error}."
+                        )
+                    elif data.get("reachable") is True:
+                        status = data.get("status_code")
+                        if isinstance(status, int):
+                            facts.append(
+                                f"HTTP probe for {target} received status {status}."
+                            )
+                        else:
+                            facts.append(
+                                f"HTTP probe for {target} reported the endpoint reachable."
+                            )
+
+                for data in tcp_records:
+                    if not isinstance(data, dict):
+                        continue
+                    if data.get("reachable") is False:
+                        error = data.get("error_type") or "connection failure"
+                        facts.append(
+                            f"TCP probe for {label} failed with {error}."
+                        )
+                    elif data.get("reachable") is True:
+                        facts.append(f"TCP connectivity to {label} succeeded.")
+
+                host_normalized = host.casefold()
+                is_loopback = (
+                    host_normalized == "localhost"
+                    or host_normalized == "::1"
+                    or host_normalized.startswith("127.")
+                )
+                listener = listener_by_port.get(port) if is_loopback else None
+
+                if entry_is_unreachable(entry):
+                    if listener is not None:
+                        count = listener["count"]
+                        listeners = listener["listeners"]
+                        if count == 0 and not listeners:
+                            facts.append(
+                                f"Local socket inspection reported zero listening "
+                                f"sockets on {label} at inspection time."
+                            )
+                            hypotheses.append(
+                                f"The failure at {label} is consistent with no "
+                                "local listener; the expected service owner is unknown."
+                            )
+                        elif count > 0 and listeners:
+                            facts.append(
+                                f"Local socket inspection reported {count} "
+                                f"listening socket(s) on local port {port}."
+                            )
+                            hypotheses.append(
+                                f"The listener reported on port {port} may not "
+                                "match the intended address, namespace, or service."
+                            )
+                    else:
+                        hypotheses.append(
+                            f"Listener state for {label} was not collected; "
+                            "a missing listener is possible but unconfirmed."
+                        )
+                        next_checks.append(
+                            f"Inspect the listener on {label}, then identify its "
+                            "expected owner from application or deployment configuration."
+                        )
+
+            summary = (
+                f"Connection failure was observed on {unreachable_count} of "
+                f"{len(endpoint_observations)} observed endpoints. "
+                "Similar symptoms do not establish a shared root cause."
+            )
+            return DiagnosticReport(
+                classification="endpoint_unreachable",
+                confidence="high",
+                summary=summary,
+                confirmed_facts=tuple(facts),
+                hypotheses=tuple(hypotheses),
+                next_checks=tuple(next_checks),
+            )
+
     # Endpoint diagnosis: a transport failure is distinct from an HTTP response.
     if tcp_data is not None or http_data is not None:
         endpoint_unreachable = (

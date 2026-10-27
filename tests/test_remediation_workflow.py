@@ -733,3 +733,38 @@ def test_no_proposal_uses_empty_listener_evidence_for_refused_endpoint() -> None
     assert "status và log" not in next_step
     assert result["changes_made"] is False
     assert result["follow_up_question"] is None
+
+def test_multi_endpoint_recommendation_uses_diagnostic_next_check():
+    from linux_admin.remediation_workflow import no_proposal_result
+
+    request = (
+        "Compare the connection failure across "
+        "http://127.0.0.1:1/ and http://127.0.0.1:2/"
+    )
+    recommendation = (
+        "Inspect the listener on 127.0.0.1:2, then identify its expected "
+        "owner from application or deployment configuration."
+    )
+    findings = [
+        (
+            "Diagnosis: Connection failure was observed on 2 of 2 endpoints "
+            "(classification=endpoint_unreachable, confidence=high)."
+        ),
+        (
+            "Confirmed fact: HTTP probe for http://127.0.0.1:1/ failed "
+            "with ConnectionRefusedError."
+        ),
+        (
+            "Confirmed fact: HTTP probe for http://127.0.0.1:2/ failed "
+            "with ConnectionRefusedError."
+        ),
+        f"Recommended next check: {recommendation}",
+    ]
+
+    result = no_proposal_result(request, findings)
+
+    assert result["status"] == "not_proposed"
+    assert result["recommended_next_step"] == recommendation
+    assert "dns" not in result["recommended_next_step"].casefold()
+    assert "gateway" not in result["recommended_next_step"].casefold()
+    assert result["changes_made"] is False

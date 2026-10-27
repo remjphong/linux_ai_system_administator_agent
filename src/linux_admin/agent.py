@@ -590,6 +590,75 @@ class HybridPlanner:
             )
         )
 
+        # Explicit multi-URL diagnostics can be planned deterministically.
+        # Keep web-research requests on their existing path.
+        if len(urls) > 1 and not research_requested:
+            available_names = {
+                spec.name
+                for spec in available_tools
+                if not spec.changes_system
+            }
+            max_steps = max(1, self._config.agent.max_steps)
+
+            # Prioritize one HTTP probe per explicit URL so endpoint
+            # comparisons do not depend on LLM-generated JSON.
+            endpoint_steps = [
+                PlanStep(
+                    "check_http_endpoint",
+                    {"url": url},
+                    f"Check explicitly supplied endpoint {url} using a read-only HTTP request",
+                )
+                for url in urls
+                if "check_http_endpoint" in available_names
+            ]
+
+            # TCP probes follow the HTTP probes and use only the remaining
+            # step budget. Never invent a host, port, or service.
+            tcp_steps = []
+            if "check_tcp_connectivity" in available_names:
+                for url in urls:
+                    parsed_url = urlsplit(url)
+                    host = parsed_url.hostname
+                    try:
+                        port = parsed_url.port
+                    except ValueError:
+                        continue
+
+                    if port is None:
+                        port = (
+                            443
+                            if parsed_url.scheme.casefold() == "https"
+                            else 80
+                        )
+
+                    if host and 1 <= port <= 65535:
+                        tcp_steps.append(
+                            PlanStep(
+                                "check_tcp_connectivity",
+                                {"host": host, "port": port},
+                                f"Check TCP connectivity for explicitly supplied endpoint {url}",
+                            )
+                        )
+
+            steps = (endpoint_steps + tcp_steps)[:max_steps]
+            if steps:
+                rationale = (
+                    "Deterministic multi-endpoint plan: prioritize a "
+                    "read-only HTTP probe for each supplied URL, then add "
+                    "TCP probes within the configured step budget."
+                )
+                if len(endpoint_steps) > max_steps:
+                    rationale += (
+                        f" The configured max_steps={max_steps} is smaller "
+                        "than the number of URLs, so not every endpoint "
+                        "can be checked in this run."
+                    )
+
+                return AgentPlan(
+                    steps=tuple(steps),
+                    rationale=rationale,
+                )
+
         # Let the LLM handle ambiguous or explicitly comparative/multi-system tasks.
         if complex_request or (
             not clear_local_intent and not research_requested
@@ -1217,6 +1286,7 @@ class Agent:
             and not result.data["listeners"]
         ):
             pending_primary = {
+                "check_tcp_connectivity",
                 "check_http_endpoint",
                 "get_service_status",
                 "get_service_logs",
@@ -1247,6 +1317,8 @@ class Agent:
                     for step, tool_result in zip(executed_steps, evidence)
                 )
                 pending_specific_checks = {
+                    "check_tcp_connectivity",
+                    "check_http_endpoint",
                     "get_service_status",
                     "get_service_logs",
                     "get_recent_errors",

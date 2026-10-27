@@ -1,139 +1,178 @@
-# Linux AI Agent System Administrator
+# Linux AI System Administrator Agent
 
-A safety-first Python application for Linux system observation, incident diagnosis,
-and controlled service administration. The team can develop and run unit tests on
-Windows 10/11, while systemd/journald integration must be verified in Ubuntu.
+Agent hỗ trợ điều tra sự cố Linux và đề xuất khắc phục có kiểm soát. Hệ thống thu thập bằng chứng bằng các công cụ đã đăng ký, kiểm tra policy, yêu cầu người vận hành phê duyệt hành động thay đổi hệ thống, rồi xác minh lại sau khi thực thi.
 
-## Implemented in this branch
+## 1. Trạng thái hiện tại
 
-- Shared contracts and validated YAML configuration.
-- Registry with explicit tool registration, argument validation, and a guard that
-  blocks ordinary invocation of state-changing tools.
-- Real read-only system tools using `psutil` for CPU, memory, disk, process, and
-  network-interface data.
-- Linux adapters for `systemctl` and `journalctl` with fixed argument arrays,
-  input validation, bounded output, and finite timeouts.
-- TCP/HTTP endpoint checks with bounded timeouts; HTTP redirects are not followed.
-- Read-only security posture checks.
-- Deterministic policy engine, console approval records, controlled executor, and
-  SQLite audit persistence.
-- Post-action verification and a bounded recovery manager that retries health checks,
-  not state-changing commands.
-- Rule-based investigation Agent that can use real registered read-only tools.
+**V1 prototype — đã chứng minh một workflow khắc phục đầu-cuối trên Ubuntu VM.** Trong lần nghiệm thu thực tế, agent phát hiện một service thử nghiệm ở trạng thái `failed`, đề xuất restart, chờ phê duyệt, restart service, xác minh service `active` và endpoint HTTP trả về `200`, rồi báo `resolved=true`. Audit SQLite có đủ sự kiện policy, phê duyệt, thực thi và xác minh.
 
-The LLM is disabled by default. The current incident planner is rule-based; no model
-is allowed to authorize actions. Service restart remains disabled by default and is
-never performed by the investigation Agent. The explicit `--restart-service` command
-uses `PolicyEngine`, asks for console approval only when enabled policy requires it,
-then performs bounded post-action health verification. It will not restart with the
-default observe/dry-run configuration.
+Trạng thái kiểm thử gần nhất (27/10/2026): **189 test passed**; Ruff, `compileall` và `git diff --check` đều thành công.
 
-## Supported environments
+Giới hạn hiện tại:
+- Các hành động khắc phục còn hạn chế; restart chỉ được đề xuất khi request nêu rõ đúng một service và bằng chứng cho thấy service đang `failed`.
+- Agent không tự đoán service sở hữu một endpoint nếu chưa có bằng chứng; khi thiếu thông tin cần hỏi làm rõ.
+- Các nhánh từ chối, policy chặn và lỗi xác minh có unit test; cần tiếp tục tăng kiểm thử tích hợp đầu-cuối cho các tình huống thất bại.
+- Dịch vụ `linux-admin-v1-demo.service` dùng trong nghiệm thu là fixture được tạo thủ công trên VM phát triển, **không được cài tự động khi clone repo**.
 
-- Windows 10/11: package setup, code development, unit tests, `psutil` observations,
-  network diagnostics, and tool-level tests. Windows does not provide `systemctl` or
-  `journalctl`; Linux-specific tools return explicit unsupported/failure results.
-- Ubuntu 22.04+ or compatible Ubuntu VM: intended environment for systemd/journald
-  integration tests and controlled service-restart tests.
-- Python 3.10 or newer.
+## 2. Môi trường yêu cầu
 
-## Setup on Windows 10/11 (PowerShell)
+- Ubuntu/Linux có `systemd` để dùng các công cụ quản trị dịch vụ.
+- Git và Python. Dự án đã được chạy trên Ubuntu 22.04 với Python 3.10.12.
+- Quyền `sudo` chỉ cần cho các thao tác quản trị hoặc khi tự dựng service thử nghiệm; chạy unit test không cần quyền quản trị.
 
-Open PowerShell in the repository root:
-
-```powershell
-py -3.10 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
-linux-admin --check-config
-pytest -q
-ruff check .
-```
-
-If `py -3.10` is unavailable but `python` is Python 3.10+, replace the first command
-with `python -m venv .venv`. If PowerShell blocks activation, use
-`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` in that same shell, then
-activate again. For Command Prompt, activate with `.venv\Scripts\activate.bat`.
-
-## Setup on Ubuntu
+## 3. Clone và cài đặt
 
 ```bash
-python3 --version
+sudo apt update
+sudo apt install -y git python3 python3-venv python3-pip
+
+git clone https://github.com/remjphong/linux_ai_system_administator_agent.git
+cd linux_ai_system_administator_agent
+
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
-linux-admin --check-config
-pytest -q
-ruff check .
 ```
 
-If `venv` is missing on Ubuntu, install the matching `python3-venv` package. Never
-replace Ubuntu's system Python to satisfy this project.
-
-## CLI
+Mỗi lần mở terminal mới, kích hoạt môi trường trước khi chạy lệnh:
 
 ```bash
-linux-admin --help
-linux-admin --version
-linux-admin --check-config
-linux-admin --list-tools
-linux-admin --investigate "Investigate disk pressure on filesystem /"
-linux-admin --investigate "Investigate service failure for demo-web.service"
-linux-admin --investigate "Investigate why http://127.0.0.1:8080/health is unreachable"
-# Explicit action entry point; safe defaults will deny/skip it unless configured
-linux-admin --restart-service demo-web.service --reason "Test controlled restart"
+cd ~/project/linux_ai_system_administator_agent
+source .venv/bin/activate
 ```
 
-`--investigate` runs a bounded read-only investigation and prints structured JSON.
-A status of `completed` means evidence collection completed; it does not mean the
-incident was repaired. Service diagnostics require Ubuntu with systemd and permissions
-to read the relevant service/journal.
+Nếu clone vào thư mục khác, thay đường dẫn `cd` tương ứng.
 
-The editable install exposes `linux-admin` from `linux_admin.main:main`. If the command
-is not found, check the virtual environment is active and run `python -m pip install -e
-".[dev]"` again.
+## 4. Cấu hình
 
-## Configuration
+Các file YAML chính nằm trong `config/`:
 
-- `config/agent.yaml`: observe/assisted mode, dry-run, step limit, tool timeout, LLM
-  toggle, and SQLite audit path.
-- `config/policy.yaml`: explicit action rules; missing rules are denied.
-- `config/services.yaml`: service allowlist and restart kill switch.
-- `.env.example`: environment variable names; copy to `.env` to configure an LLM
-  provider and/or the separate Tavily search tool. Never commit `.env` or real keys.
+| File | Vai trò |
+|---|---|
+| `config/agent.yaml` | Chế độ agent, giới hạn bước, timeout, LLM, Tavily và audit. |
+| `config/policy.yaml` | Policy hành động; mặc định từ chối nếu không có quyền cho phép rõ ràng. |
+| `config/services.yaml` | Allowlist service và cờ bật/tắt restart. |
 
-Default operation is `mode: observe`, `dry_run: true`, LLM disabled, and service
-restart disabled. To test actual restart, use an isolated Ubuntu VM snapshot, configure
-one test service, deliberately review policy and permissions, and use
-`ControlledExecutor` plus an approval record. Never enable restart on an important
-host just to test the application.
+**Mặc định an toàn:** `agent.mode=observe`, `dry_run=true`, `restart_service` bị policy từ chối, `services.restart_enabled=false`, audit bật. Service mẫu `demo-web.service` trong allowlist chỉ là ví dụ cấu hình và có thể không tồn tại trên máy.
 
-## Shared safety rules
+### LLM và tìm kiếm web (tùy chọn)
 
-1. Every registered tool exposes `.spec: ToolSpec` and implements
-   `execute(**kwargs) -> ToolResult`.
-2. `ActionRequest` is a proposal, not authorization.
-3. Policy decisions and approvals are bound to the exact action ID and argument
-   fingerprint; approval cannot transfer to changed arguments.
-4. State-changing tools cannot be called through the ordinary Registry invocation.
-5. Do not execute arbitrary shell commands from users or LLM output; do not use
-   `shell=True`, automatic `sudo`, or privilege escalation.
-6. Verify postconditions instead of trusting only a command exit code.
-7. If required audit persistence fails before execution, fail closed. If it fails after
-   an action, report uncertainty and verify system state before retrying.
-8. Unit tests use fixtures/mocks for OS commands and networking. Run real service tests
-   only in a disposable Ubuntu VM.
+Agent có thể chạy ở chế độ rule-based mà không cần LLM hay Tavily. Môi trường phát triển của tác giả dùng Ollama với `qwen2.5:1.5b` qua API tương thích OpenAI tại `http://127.0.0.1:11434/v1`; Tavily được bật riêng khi có API key.
 
-Changes to `contracts.py`, `config/*.yaml`, or tool specs affect every team member.
-Notify A/B/C, update tests and docs, and review the change before merging.
+Nếu muốn dùng cấu hình tương tự, cài đặt và khởi động Ollama, tải model:
 
+```bash
+ollama pull qwen2.5:1.5b
+```
 
-## Real LLM and Tavily web search
+Tạo file `.env` ở thư mục gốc dự án nếu cần override cấu hình. Ví dụ dưới đây dùng Ollama cục bộ; không cần bật Tavily nếu chưa có API key:
 
-The project supports an OpenAI-compatible chat-completions API for LLM planning and
-evidence synthesis. Tavily is integrated separately as an optional read-only web
-search tool; a Tavily key alone does not enable LLM reasoning. See
-[`docs/llm-and-tavily-setup.md`](docs/llm-and-tavily-setup.md) for the exact `.env`
-variables, configuration switches, validation commands, and end-to-end workflow.
+```dotenv
+LLM_ENABLED=true
+LLM_PROVIDER=openai_compatible
+LLM_MODEL=qwen2.5:1.5b
+LLM_BASE_URL=http://127.0.0.1:11434/v1
+LLM_API_KEY=ollama
+LLM_PLANNING_MODE=llm
+TAVILY_ENABLED=false
+```
+
+Để tra cứu web, bật `TAVILY_ENABLED=true` và đặt `TAVILY_API_KEY` bằng key riêng của bạn. **Không commit `.env`, API key hoặc thông tin bí mật lên Git.** Tùy chọn cấu hình từ môi trường có thể ghi đè giá trị YAML; dùng `linux-admin --check-config` để xem cấu hình hiệu lực.
+
+## 5. Các lệnh sử dụng
+
+### Kiểm tra cấu hình và danh sách công cụ
+
+```bash
+linux-admin --check-config
+linux-admin --list-tools
+```
+
+### Chạy điều tra chỉ đọc
+
+Ví dụ kiểm tra tài nguyên và lỗi hệ thống mà không thay đổi máy:
+
+```bash
+LLM_ENABLED=false LLM_PLANNING_MODE=rules TAVILY_ENABLED=false \
+linux-admin --investigate \
+  "Inspect CPU and memory usage and recent system errors. Use read-only tools and do not change system state."
+```
+
+Kiểm tra một endpoint được chỉ định rõ ràng:
+
+```bash
+LLM_ENABLED=false LLM_PLANNING_MODE=rules TAVILY_ENABLED=false \
+linux-admin --investigate \
+  "Check whether http://127.0.0.1:11434/ is reachable. Use read-only tools and do not change system state."
+```
+
+Ví dụ endpoint thứ hai phù hợp khi Ollama đang chạy; thay URL bằng endpoint thực tế cần kiểm tra. Kết quả là JSON gồm findings, evidence, đề xuất hoặc lý do không đề xuất, cùng trạng thái resolution.
+
+### Dùng thư mục cấu hình riêng
+
+CLI hỗ trợ nạp `agent.yaml`, `policy.yaml` và `services.yaml` từ một thư mục riêng:
+
+```bash
+linux-admin --check-config --config-dir /path/to/config-dir
+```
+
+Chỉ dùng cấu hình có `assisted`, `dry_run=false` và quyền restart được bật khi đã kiểm tra kỹ policy, allowlist, audit, cơ chế phê duyệt và phạm vi tác động. Không dùng cấu hình thử nghiệm để quản trị máy production.
+
+## 6. Chạy kiểm thử
+
+Chạy toàn bộ test suite:
+
+```bash
+LLM_ENABLED=false LLM_PLANNING_MODE=rules TAVILY_ENABLED=false \
+timeout 30s python -m pytest -q
+```
+
+Chạy các kiểm tra chất lượng:
+
+```bash
+python -m ruff check src tests
+python -m compileall -q src tests
+git diff --check
+```
+
+Chạy riêng các test liên quan workflow khắc phục:
+
+```bash
+python -m pytest -q tests/test_remediation_workflow.py tests/test_agent_workflow.py
+```
+
+Unit test dùng công cụ giả ở những nơi thích hợp; chúng không thay thế kiểm thử tích hợp trên một máy thử nghiệm an toàn.
+
+## 7. Workflow khắc phục và an toàn
+
+Workflow mục tiêu:
+
+1. Nhận yêu cầu và thu thập bằng chứng chỉ đọc.
+2. Chẩn đoán, phân biệt sự thật đã quan sát với giả thuyết.
+3. Tạo đề xuất có mục tiêu, lý do, bằng chứng, rủi ro và kế hoạch xác minh.
+4. Kiểm tra policy và yêu cầu người vận hành phê duyệt.
+5. Thực thi hành động đã được cho phép và ghi audit.
+6. Kiểm tra lại trạng thái service và, khi phù hợp, endpoint ban đầu.
+7. Báo cáo `resolved`, `unresolved` hoặc chưa thể xác minh dựa trên kết quả hậu kiểm.
+
+`systemctl restart` trả về thành công **không tự nó chứng minh** sự cố đã được khắc phục. Với endpoint HTTP, agent cần xác minh endpoint sau hành động. Khi audit hoặc hậu kiểm thất bại, không được tuyên bố đã phục hồi thành công.
+
+Không chạy `--restart-service` hoặc bật quyền restart cho một service thật nếu chưa xác nhận service đó nằm trong allowlist, policy cho phép, audit bật và cơ chế phê duyệt đang hoạt động. Cấu hình mặc định cố ý giữ restart bị vô hiệu hóa.
+
+## 8. Cấu trúc mã nguồn
+
+- `src/linux_admin/agent.py`: planner, điều phối điều tra và thực thi công cụ chỉ đọc.
+- `src/linux_admin/tools/`: công cụ hệ thống, service, log, network, security và Tavily.
+- `src/linux_admin/diagnostics.py`: chẩn đoán dựa trên bằng chứng.
+- `src/linux_admin/remediation_workflow.py`: đề xuất, phê duyệt, thực thi, hậu kiểm và báo cáo khắc phục.
+- `src/linux_admin/control.py`: kiểm tra policy, quản lý phê duyệt và thực thi có kiểm soát.
+- `src/linux_admin/verification.py`: kiểm tra sức khỏe sau hành động.
+- `src/linux_admin/audit.py`: audit log lưu bằng SQLite.
+- `tests/`: unit test và test workflow.
+
+## 9. Ghi chú phát triển
+
+- Giữ cấu hình mặc định ở chế độ an toàn; dùng cấu hình riêng và dịch vụ dùng một lần cho nghiệm thu hành động thật.
+- Không suy đoán service owner từ URL hoặc từ log không liên quan.
+- Mỗi kết luận `resolved=true` phải dựa trên các kiểm tra hậu kiểm đã qua, không chỉ dựa vào việc lệnh thay đổi hệ thống trả về thành công.

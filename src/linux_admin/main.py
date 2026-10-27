@@ -59,6 +59,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--config-dir",
+        metavar="DIR",
+        help=(
+            "Load agent.yaml, policy.yaml, and services.yaml from DIR "
+            "instead of the default project config directory."
+        ),
+    )
+    parser.add_argument(
         "--reason",
         default="Operator-requested service restart",
         help="Reason recorded for --restart-service",
@@ -348,7 +356,11 @@ def main() -> int:
         return 0
 
     try:
-        config = load_config()
+        config = (
+            load_config(config_dir=args.config_dir)
+            if args.config_dir
+            else load_config()
+        )
     except ConfigurationError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
