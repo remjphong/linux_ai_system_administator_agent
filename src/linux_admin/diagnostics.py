@@ -24,6 +24,7 @@ DiagnosisClass = Literal[
     "service_inactive",
     "resource_pressure",
     "resource_snapshot_no_pressure_signal",
+    "system_survey",
     "service_inventory_failed",
     "service_inventory_clean",
     "network_state_observed",
@@ -579,6 +580,339 @@ def diagnose_incident(
     journal_data = _last_success_data(journal_results)
     journal_checked = any(result.ok for result in journal_results)
     messages = clean_journal_messages(journal_data)
+
+    # A broad health request must aggregate all collected read-only evidence.
+    # Keep named-service and explicit-endpoint diagnoses in their existing
+    # earlier branches.
+    system_survey_intent = mentions(
+        "tinh trang he thong",
+        "he thong dang trong tinh trang the nao",
+        "he thong dang o tinh trang nao",
+        "he thong hien tai the nao",
+        "tinh hinh he thong",
+        "kiem tra trang thai he thong",
+        "kiem tra tong the",
+        "kiem tra he thong",
+        "co van de nao bat thuong",
+        "co gi bat thuong",
+        "co gi khong on",
+        "overall system",
+        "system health",
+        "system status",
+        "general system survey",
+        "anything unusual",
+        "any abnormalities",
+        "is anything wrong",
+    )
+
+    if (
+        system_survey_intent
+        and ".service" not in user_request.casefold()
+        and "://" not in user_request
+    ):
+        survey_facts: list[str] = []
+        survey_hypotheses: list[str] = []
+        survey_next_checks: list[str] = []
+        pressure_indicators: list[str] = []
+        summary_signals: list[str] = []
+
+        survey_system = _last_success_data(
+            by_tool.get("get_system_overview", [])
+        )
+        survey_disk = _last_success_data(by_tool.get("get_disk_usage", []))
+        survey_network = _last_success_data(
+            by_tool.get("get_network_state", [])
+        )
+        survey_services = _last_success_data(failed_service_results)
+
+        survey_cpu = _valid_percentage(survey_system, "cpu_percent")
+        survey_memory = _valid_percentage(survey_system, "memory_percent")
+        survey_swap = _valid_percentage(survey_system, "swap_percent")
+        survey_disk_used = _valid_percentage(survey_disk, "used_percent")
+
+        if survey_system is not None:
+            for label, value, threshold in (
+                ("CPU", survey_cpu, 90.0),
+                ("RAM", survey_memory, 90.0),
+                ("Swap", survey_swap, 80.0),
+            ):
+                if value is None:
+                    continue
+
+                if label == "CPU":
+                    survey_facts.append(
+                        f"CPU utilization was {value:.1f}% in the collected snapshot."
+                    )
+                elif label == "RAM":
+                    survey_facts.append(
+                        f"RAM utilization was {value:.1f}%."
+                    )
+                else:
+                    survey_facts.append(
+                        f"Swap utilization was {value:.1f}%."
+                    )
+
+                if value >= threshold:
+                    message = (
+                        f"{label} utilization reached {value:.1f}%, "
+                        f"at or above the {threshold:.0f}% "
+                        "investigation threshold."
+                    )
+                    pressure_indicators.append(message)
+                    survey_facts.append(message)
+
+            process_count = survey_system.get("process_count")
+            if isinstance(process_count, int) and not isinstance(
+                process_count, bool
+            ):
+                survey_facts.append(
+                    f"The system snapshot reported {process_count} processes."
+                )
+        else:
+            survey_facts.append(
+                "No successful system-resource snapshot was available."
+            )
+
+        if survey_disk is not None:
+            disk_path = str(survey_disk.get("path", "the reported filesystem"))
+            if survey_disk_used is not None:
+                survey_facts.append(
+                    f"Filesystem {disk_path} was {survey_disk_used:.1f}% used."
+                )
+                if survey_disk_used >= 90:
+                    message = (
+                        f"Filesystem {disk_path} was {survey_disk_used:.1f}% "
+                        "used, at or above the 90% investigation threshold."
+                    )
+                    pressure_indicators.append(message)
+                    survey_facts.append(message)
+        else:
+            survey_facts.append(
+                "No successful filesystem-usage result was available."
+            )
+
+        if survey_network is not None:
+            interfaces = survey_network.get("interfaces")
+            if isinstance(interfaces, list):
+                up_names = [
+                    str(item.get("name", "unknown"))
+                    for item in interfaces
+                    if isinstance(item, dict) and item.get("is_up") is True
+                ]
+                down_names = [
+                    str(item.get("name", "unknown"))
+                    for item in interfaces
+                    if isinstance(item, dict) and item.get("is_up") is False
+                ]
+                survey_facts.append(
+                    f"The local network query reported {len(interfaces)} "
+                    f"interface record(s): {len(up_names)} up and "
+                    f"{len(down_names)} down at inspection time."
+                )
+                if down_names:
+                    survey_facts.append(
+                        "Interfaces reported down: " + ", ".join(down_names[:10]) + "."
+                    )
+            else:
+                survey_facts.append(
+                    "The network query did not return a valid interface list."
+                )
+        else:
+            survey_facts.append(
+                "No successful local network-state result was available."
+            )
+
+        failed_service_names: list[str] = []
+        service_inventory_valid = False
+
+        if survey_services is not None:
+            raw_failed = survey_services.get("failed_services")
+            if isinstance(raw_failed, list):
+                service_inventory_valid = True
+                failed_service_names = [
+                    str(name) for name in raw_failed
+                ]
+                if failed_service_names:
+                    survey_facts.append(
+                        f"The systemd query reported {len(failed_service_names)} "
+                        "failed service unit(s)."
+                    )
+                    survey_facts.extend(
+                        f"Reported failed unit: {name}"
+                        for name in failed_service_names[:10]
+                    )
+                    summary_signals.append(
+                        f"{len(failed_service_names)} failed systemd unit(s)"
+                    )
+                else:
+                    survey_facts.append(
+                        "The systemd failed-service query returned no failed units."
+                    )
+            else:
+                survey_facts.append(
+                    "The failed-service query did not return a valid service list."
+                )
+        else:
+            survey_facts.append(
+                "No successful failed-service inventory was available."
+            )
+
+        if journal_checked:
+            if messages:
+                survey_facts.append(
+                    f"The recent error-priority journal query returned "
+                    f"{len(messages)} non-empty message(s)."
+                )
+                survey_facts.extend(
+                    f"Recent journal message: {message[:300]}"
+                    for message in messages[:5]
+                )
+                summary_signals.append(
+                    f"{len(messages)} recent error-priority journal "
+                    "message(s) were found"
+                )
+                survey_hypotheses.append(
+                    "The journal messages may be unrelated to the current "
+                    "problem; timestamps and affected components need correlation."
+                )
+                survey_next_checks.append(
+                    "Correlate recent journal messages with the time and "
+                    "component of any observed symptom."
+                )
+            else:
+                survey_facts.append(
+                    "No error-priority journal messages were returned in "
+                    "the queried time window."
+                )
+        else:
+            survey_facts.append(
+                "No successful recent-error journal result was available."
+            )
+
+        survey_tool_names = {
+            "get_system_overview",
+            "get_disk_usage",
+            "get_network_state",
+            "get_failed_services",
+            "get_recent_errors",
+        }
+        failed_survey_tools = [
+            result
+            for result in evidence
+            if result.tool_name in survey_tool_names and not result.ok
+        ]
+        for result in failed_survey_tools:
+            survey_facts.append(
+                f"Read-only check {result.tool_name} did not complete "
+                f"successfully (status={result.status})."
+            )
+        if failed_survey_tools:
+            summary_signals.append(
+                f"{len(failed_survey_tools)} read-only check(s) failed"
+            )
+
+        if pressure_indicators:
+            summary_signals.append(
+                f"{len(pressure_indicators)} resource threshold signal(s)"
+            )
+            survey_hypotheses.append(
+                "High resource utilization may reflect a workload spike or "
+                "capacity constraint; a snapshot does not establish the root cause."
+            )
+            survey_next_checks.append(
+                "Repeat resource measurements and inspect process activity "
+                "and disk I/O before attributing a cause."
+            )
+        elif survey_system is not None:
+            survey_hypotheses.append(
+                "A single resource snapshot may miss transient load or "
+                "short-lived memory pressure."
+            )
+
+        if survey_network is not None:
+            survey_hypotheses.append(
+                "An interface being up does not establish DNS resolution, "
+                "gateway reachability, or Internet connectivity."
+            )
+
+        survey_hypotheses.append(
+            "This survey does not establish application-level health or "
+            "provide a comprehensive security assessment."
+        )
+
+        if failed_service_names:
+            survey_next_checks.append(
+                "Inspect the status and recent logs of the reported failed "
+                "units before deciding whether any recovery action is justified."
+            )
+
+        if (
+            not failed_service_names
+            and service_inventory_valid
+            and messages
+        ):
+            survey_next_checks.append(
+                "Identify the component associated with each relevant log "
+                "message before treating it as an active incident."
+            )
+
+        if summary_signals:
+            summary = (
+                "System survey completed; "
+                + "; ".join(summary_signals)
+                + ". These observations do not by themselves establish a "
+                "single root cause or overall system health."
+            )
+        else:
+            neutral_observations: list[str] = []
+            if survey_system is not None and not pressure_indicators:
+                neutral_observations.append(
+                    "no configured resource threshold was crossed"
+                )
+            if service_inventory_valid and not failed_service_names:
+                neutral_observations.append(
+                    "no failed systemd units were reported"
+                )
+            if journal_checked and not messages:
+                neutral_observations.append(
+                    "no recent error-priority journal messages were returned"
+                )
+
+            if neutral_observations:
+                summary = (
+                    "System survey completed; "
+                    + "; ".join(neutral_observations)
+                    + ". This does not establish overall system health."
+                )
+            else:
+                summary = (
+                    "System survey completed, but evidence was incomplete; "
+                    "an overall health conclusion cannot be made."
+                )
+
+        if not survey_next_checks:
+            survey_next_checks.append(
+                "If a symptom persists, check the affected application's "
+                "health endpoint and service-specific logs."
+            )
+
+        successful_survey_names = {
+            result.tool_name
+            for result in evidence
+            if result.tool_name in survey_tool_names and result.ok
+        }
+        confidence = (
+            "medium" if successful_survey_names else "low"
+        )
+
+        return DiagnosticReport(
+            classification="system_survey",
+            confidence=confidence,
+            summary=summary,
+            confirmed_facts=tuple(survey_facts),
+            hypotheses=tuple(survey_hypotheses),
+            next_checks=tuple(survey_next_checks),
+        )
 
     # Generic service investigations may have an inventory without an
     # individual get_service_status result.

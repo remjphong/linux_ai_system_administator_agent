@@ -1,0 +1,82 @@
+from types import SimpleNamespace
+
+from linux_admin.agent import RuleBasedPlanner
+from linux_admin.contracts import ToolSpec
+
+TOOL_NAMES = (
+    "get_system_overview",
+    "list_top_processes",
+    "get_disk_usage",
+    "get_network_state",
+    "get_failed_services",
+    "get_recent_errors",
+    "get_service_logs",
+    "get_service_status",
+)
+
+
+def make_planner() -> RuleBasedPlanner:
+    config = SimpleNamespace(
+        agent=SimpleNamespace(connectivity_check_url=None),
+        services=SimpleNamespace(allowlist=()),
+    )
+    return RuleBasedPlanner(config)
+
+
+def make_tools() -> list[ToolSpec]:
+    return [
+        ToolSpec(name=name, description="Read-only planner test tool")
+        for name in TOOL_NAMES
+    ]
+
+
+def planned_tool_names(request: str) -> set[str]:
+    plan = make_planner().create_plan(request, make_tools())
+    return {step.tool_name for step in plan.steps}
+
+
+def test_generic_vietnamese_health_check_uses_broad_survey() -> None:
+    request = (
+        "Kiểm tra tình trạng hệ thống, có vấn đề nào bất thường không. "
+        "Chỉ thu thập bằng chứng và báo cáo, không thay đổi hệ thống."
+    )
+    assert planned_tool_names(request) == {
+        "get_system_overview",
+        "get_disk_usage",
+        "get_network_state",
+        "get_failed_services",
+        "get_recent_errors",
+    }
+
+
+def test_resource_request_still_selects_resource_tools() -> None:
+    names = planned_tool_names(
+        "Kiểm tra CPU, RAM và các tiến trình sử dụng nhiều tài nguyên."
+    )
+    assert names == {"get_system_overview", "list_top_processes"}
+
+
+def test_service_and_log_request_avoids_resource_false_positive() -> None:
+    request = (
+        "Kiểm tra các dịch vụ đang lỗi và đọc log liên quan. "
+        "Chỉ báo cáo, không restart."
+    )
+    assert planned_tool_names(request) == {
+        "get_failed_services",
+        "get_recent_errors",
+    }
+
+
+def test_substring_do_does_not_match_doc_or_doi() -> None:
+    assert not RuleBasedPlanner._contains_any(
+        "doc log doi", ("do",)
+    )
+    assert RuleBasedPlanner._contains_any(
+        "doc log", ("log",)
+    )
+
+
+def test_vietnamese_network_status_selects_network_diagnostics() -> None:
+    names = planned_tool_names("Kiểm tra trạng thái mạng.")
+    assert names == {"get_network_state", "get_recent_errors"}
+

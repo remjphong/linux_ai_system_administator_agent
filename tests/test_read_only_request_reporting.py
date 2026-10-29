@@ -1,0 +1,254 @@
+from linux_admin.main import _is_observation_only_request
+from linux_admin.terminal_report import _render_user_report
+
+
+def make_payload(request, tool_names):
+    return {
+        "incident_id": "test-incident",
+        "request": request,
+        "status": "completed",
+        "steps": len(tool_names),
+        "findings": [
+            (
+                "Diagnosis: Inspection completed from collected evidence "
+                "(classification=resource_snapshot_no_pressure_signal, confidence=medium)."
+            )
+        ],
+        "evidence": [
+            {"tool_name": name, "ok": True, "status": "success", "data": {}}
+            for name in tool_names
+        ],
+        "remediation": {
+            "status": "not_proposed",
+            "changes_made": False,
+            "recommended_next_step": "Collect another sample if the issue recurs.",
+            "problem_resolution": {"status": "diagnosis_only", "resolved": False},
+        },
+    }
+
+
+def test_generic_health_report_uses_system_label_and_read_only_headline():
+    payload = make_payload(
+        "Kiểm tra tình trạng hệ thống, có vấn đề nào bất thường không.",
+        [
+            "get_system_overview",
+            "get_disk_usage",
+            "get_network_state",
+            "get_failed_services",
+            "get_recent_errors",
+        ],
+    )
+    report = _render_user_report(payload, 0)
+
+    assert "Su co: Tình trạng hệ thống" in report
+    assert "Dịch vụ đang được kiểm tra" not in report
+    assert "DA HOAN TAT KIEM TRA - KHONG THUC HIEN THAY DOI" in report
+    assert "Collect another sample if the issue recurs." in report
+
+
+def test_resource_request_is_labeled_as_system_resources():
+    payload = make_payload(
+        "Kiểm tra CPU, RAM và các tiến trình sử dụng nhiều tài nguyên.",
+        ["get_system_overview", "list_top_processes"],
+    )
+    report = _render_user_report(payload, 0)
+    assert "Su co: Tài nguyên hệ thống" in report
+
+
+def test_observation_requests_do_not_need_incident_clarification():
+    assert _is_observation_only_request(
+        "Kiểm tra CPU, RAM và các tiến trình sử dụng nhiều tài nguyên."
+    )
+    assert _is_observation_only_request(
+        "Kiểm tra các dịch vụ đang lỗi và đọc log liên quan. "
+        "Chỉ báo cáo, không restart."
+    )
+
+
+def test_repair_request_is_not_classified_as_observation_only():
+    assert not _is_observation_only_request(
+        "Investigate why the service failed and restore it if evidence supports a restart."
+    )
+
+
+def test_negated_restart_is_not_treated_as_repair_intent():
+    assert _is_observation_only_request(
+        "Kiểm tra dịch vụ và log, không restart."
+    )
+
+
+def test_system_survey_report_shows_key_metrics_and_check_limits():
+    payload = make_payload(
+        "Kiểm tra tình trạng hệ thống, có vấn đề nào bất thường không.",
+        [
+            "get_system_overview",
+            "get_disk_usage",
+            "get_network_state",
+            "get_failed_services",
+            "get_recent_errors",
+        ],
+    )
+    payload["findings"][0] = (
+        "Diagnosis: System survey completed "
+        "(classification=system_survey, confidence=medium)."
+    )
+    payload["evidence"] = [
+        {
+            "tool_name": "get_system_overview",
+            "ok": True,
+            "status": "success",
+            "data": {
+                "cpu_percent": 0.0,
+                "memory_percent": 28.4,
+                "swap_percent": 0.0,
+            },
+        },
+        {
+            "tool_name": "get_disk_usage",
+            "ok": True,
+            "status": "success",
+            "data": {"path": "/", "used_percent": 59.1},
+        },
+        {
+            "tool_name": "get_network_state",
+            "ok": True,
+            "status": "success",
+            "data": {
+                "interfaces": [
+                    {"name": "enp0s3", "is_up": True},
+                    {"name": "lo", "is_up": True},
+                ]
+            },
+        },
+        {
+            "tool_name": "get_failed_services",
+            "ok": True,
+            "status": "success",
+            "data": {"failed_services": [], "count": 0},
+        },
+        {
+            "tool_name": "get_recent_errors",
+            "ok": True,
+            "status": "success",
+            "data": {"errors": [], "count": 0, "since_minutes": 60},
+        },
+    ]
+
+    report = _render_user_report(payload, 0)
+
+    assert "TÓM TẮT BẰNG CHỨNG" in report
+    assert "CPU: 0.0%; RAM: 28.4%; swap: 0.0%" in report
+    assert "Ổ đĩa /: đã sử dụng 59.1%" in report
+    assert "2 giao diện được liệt kê; 2 up, 0 down" in report
+    assert "không tìm thấy unit ở trạng thái failed" in report
+    assert "không có thông điệp mức error" in report
+    assert "không xác nhận toàn bộ sức khỏe ứng dụng" in report
+
+
+def test_system_survey_report_identifies_missing_checks():
+    payload = make_payload(
+        "Kiểm tra tình trạng hệ thống.",
+        ["get_system_overview"],
+    )
+    payload["findings"][0] = (
+        "Diagnosis: System survey incomplete "
+        "(classification=system_survey, confidence=low)."
+    )
+    payload["evidence"] = [
+        {
+            "tool_name": "get_system_overview",
+            "ok": True,
+            "status": "success",
+            "data": {"cpu_percent": 10.0},
+        }
+    ]
+
+    report = _render_user_report(payload, 0)
+
+    assert "Chưa thu thập được:" in report
+    assert "dung lượng ổ đĩa" in report
+    assert "nhật ký lỗi gần đây" in report
+
+
+def test_resource_report_shows_cpu_ram_and_top_processes():
+    payload = make_payload(
+        "Kiểm tra CPU và RAM.",
+        ["get_system_overview", "list_top_processes"],
+    )
+    payload["findings"][0] = (
+        "Diagnosis: No configured high-utilization threshold was crossed "
+        "(classification=resource_snapshot_no_pressure_signal, confidence=medium)."
+    )
+    payload["evidence"] = [
+        {
+            "tool_name": "get_system_overview",
+            "ok": True,
+            "status": "success",
+            "data": {
+                "cpu_percent": 1.7,
+                "memory_percent": 28.3,
+                "swap_percent": 0.0,
+            },
+        },
+        {
+            "tool_name": "list_top_processes",
+            "ok": True,
+            "status": "success",
+            "data": {
+                "sort_by": "rss_bytes",
+                "processes": [
+                    {
+                        "pid": 123,
+                        "name": "python",
+                        "rss_bytes": 536870912,
+                        "memory_percent": 8.5,
+                    }
+                ],
+            },
+        },
+    ]
+
+    report = _render_user_report(payload, 0)
+
+    assert "TÓM TẮT BẰNG CHỨNG" in report
+    assert "CPU: 1.7%; RAM: 28.3%; swap: 0.0%" in report
+    assert "Top tiến trình theo RAM" in report
+    assert "python (PID 123, RSS 512.0 MiB, 8.5% RAM)" in report
+    assert "Chưa thu thập được:" not in report
+    assert "Dịch vụ đang được kiểm tra" not in report
+
+
+def test_generic_system_status_report_has_system_label():
+    payload = make_payload(
+        "hệ thống đang trong tình trạng thế nào",
+        [
+            "get_system_overview",
+            "get_disk_usage",
+            "get_network_state",
+            "get_failed_services",
+            "get_recent_errors",
+        ],
+    )
+    payload["findings"][0] = (
+        "Diagnosis: System survey completed "
+        "(classification=system_survey, confidence=medium)."
+    )
+
+    report = _render_user_report(payload, 0)
+
+    assert "Su co: Tình trạng hệ thống" in report
+    assert "Dịch vụ đang được kiểm tra" not in report
+    assert "TÓM TẮT BẰNG CHỨNG" in report
+
+
+def test_accents_and_no_accents_network_requests_do_not_need_follow_up():
+    assert _is_observation_only_request("kiểm tra trạng thái mạng")
+    assert _is_observation_only_request("kiểm tra trang thái mạng")
+    assert _is_observation_only_request("hệ thống đang trong tình trạng thế nào")
+
+
+def test_network_check_with_negated_restart_remains_read_only():
+    assert _is_observation_only_request(
+        "Kiểm tra trạng thái mạng, chỉ báo cáo, không restart."
+    )
+

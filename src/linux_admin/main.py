@@ -71,6 +71,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="Operator-requested service restart",
         help="Reason recorded for --restart-service",
     )
+    parser.add_argument(
+        "request_text",
+        nargs="*",
+        metavar="REQUEST_TEXT",
+        help=(
+            "Natural-language request; when used alone, "
+            "run an investigation."
+        ),
+    )
+
     return parser
 
 
@@ -341,10 +351,89 @@ def _is_test_only_follow_up_answer(answer: str) -> bool:
     return any(marker in normalized for marker in markers)
 
 
+
+
+def _is_observation_only_request(request: str) -> bool:
+    """Recognize read-only checks even when Vietnamese accents vary."""
+    import unicodedata
+
+    normalized = request.casefold().replace("đ", "d")
+    normalized = "".join(
+        character
+        for character in unicodedata.normalize("NFKD", normalized)
+        if not unicodedata.combining(character)
+    )
+    normalized = " ".join(normalized.split())
+
+    # A negated action must not turn a read-only request into a repair request.
+    negations = (
+        "khong restart",
+        "khong khoi dong lai",
+        "don't restart",
+        "do not restart",
+        "no restart",
+        "without restarting",
+        "khong sua",
+        "khong khac phuc",
+        "do not fix",
+        "don't fix",
+    )
+    for phrase in negations:
+        normalized = normalized.replace(phrase, " ")
+
+    action_markers = (
+        "restore", "repair", "fix", "recover", "remediate",
+        "resolve the issue", "resolve this",
+        "khac phuc", "sua loi", "sua chua",
+        "khoi phuc", "khoi dong lai", "restart",
+    )
+    if any(marker in normalized for marker in action_markers):
+        return False
+
+    observation_markers = (
+        "kiem tra tinh trang he thong",
+        "tinh trang he thong",
+        "he thong dang trong tinh trang the nao",
+        "he thong dang o tinh trang nao",
+        "he thong hien tai the nao",
+        "tinh hinh he thong",
+        "kiem tra tong the",
+        "kiem tra he thong",
+        "system health", "health check", "overall system",
+        "system status", "system overview",
+        "kiem tra cpu", "kiem tra ram", "kiem tra tai nguyen",
+        "kiem tra trang thai mang", "trang thai mang",
+        "tinh trang mang", "kiem tra mang",
+        "cpu", "ram", "memory", "tai nguyen",
+        "o dia", "disk usage", "top processes", "tien trinh",
+        "kiem tra cac dich vu dang loi",
+        "dich vu dang loi", "kiem tra dich vu",
+        "failed services", "service status",
+        "doc log", "log lien quan", "read logs", "recent errors",
+        "check connectivity", "check endpoint",
+    )
+    return any(marker in normalized for marker in observation_markers)
+
 def main() -> int:
     """Run the selected CLI operation and return a process exit code."""
     parser = build_parser()
     args = parser.parse_args()
+    # Allow a natural-language request without --investigate.
+    if args.request_text:
+        explicit_mode = any((
+            args.check_config,
+            args.list_tools,
+            args.investigate,
+            args.restart_service,
+        ))
+        if explicit_mode:
+            parser.error(
+                "Use a natural-language request alone, or choose a mode flag; do not combine them."
+            )
+        args.investigate = " ".join(args.request_text).strip()
+        if not args.investigate:
+            parser.error("The request cannot be empty.")
+
 
     if not (
         args.check_config
@@ -405,6 +494,9 @@ def main() -> int:
             )
 
             question = output["remediation"].get("follow_up_question")
+            if question and _is_observation_only_request(args.investigate):
+                output["remediation"]["follow_up_question"] = None
+                question = None
             answer = _read_follow_up_answer(question) if question else None
 
             if answer:
@@ -528,6 +620,19 @@ def main() -> int:
         if audit_logger is not None:
             audit_logger.close()
 
+
+
+# DUAL_TERMINAL_REPORT_PATCH
+# Keep the investigation workflow intact; only reorganize its terminal output.
+_original_run_investigation_for_report = _run_investigation
+
+
+def _run_investigation(*args, **kwargs):
+    from linux_admin.terminal_report import run_with_dual_report
+
+    return run_with_dual_report(
+        _original_run_investigation_for_report, *args, **kwargs
+    )
 
 if __name__ == "__main__":
     raise SystemExit(main())

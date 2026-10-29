@@ -333,3 +333,114 @@ def test_normal_resource_snapshot_does_not_claim_system_is_healthy():
     assert "does not establish overall system health" in report.summary
     assert any("single sample" in hypothesis for hypothesis in report.hypotheses)
 
+
+def test_general_system_survey_aggregates_all_read_only_evidence() -> None:
+    report = diagnose_incident(
+        "Kiểm tra tình trạng hệ thống, có vấn đề nào bất thường không.",
+        [
+            result(
+                "get_system_overview",
+                {
+                    "cpu_percent": 12.0,
+                    "memory_percent": 28.2,
+                    "swap_percent": 0.0,
+                    "process_count": 218,
+                },
+            ),
+            result(
+                "get_disk_usage",
+                {"path": "/", "used_percent": 59.1},
+            ),
+            result(
+                "get_network_state",
+                {
+                    "count": 2,
+                    "interfaces": [
+                        {"name": "enp0s3", "is_up": True, "addresses": []},
+                        {"name": "lo", "is_up": True, "addresses": []},
+                    ],
+                },
+            ),
+            result(
+                "get_failed_services",
+                {"failed_services": [], "count": 0},
+            ),
+            result(
+                "get_recent_errors",
+                {
+                    "errors": [
+                        "polkit-agent-helper: authentication conversation failed",
+                        "pam_unix(polkit-1:auth): could not identify password",
+                    ],
+                    "count": 2,
+                    "since_minutes": 60,
+                },
+            ),
+        ],
+    )
+
+    assert report.classification == "system_survey"
+    assert report.confidence == "medium"
+    assert "2 recent error-priority journal message(s) were found" in report.summary
+    assert any("CPU utilization was 12.0%" in fact for fact in report.confirmed_facts)
+    assert any("RAM utilization was 28.2%" in fact for fact in report.confirmed_facts)
+    assert any("Filesystem / was 59.1% used" in fact for fact in report.confirmed_facts)
+    assert any("2 interface record(s): 2 up and 0 down" in fact for fact in report.confirmed_facts)
+    assert any("returned no failed units" in fact for fact in report.confirmed_facts)
+    assert any("2 non-empty message(s)" in fact for fact in report.confirmed_facts)
+    assert any("polkit-agent-helper" in fact for fact in report.confirmed_facts)
+    assert any("does not establish DNS resolution" in item for item in report.hypotheses)
+    assert any("comprehensive security assessment" in item for item in report.hypotheses)
+
+
+def test_system_survey_reports_pressure_without_claiming_a_root_cause() -> None:
+    report = diagnose_incident(
+        "Kiểm tra tình trạng hệ thống, có vấn đề nào bất thường không.",
+        [
+            result("get_system_overview", {
+                "cpu_percent": 95.0,
+                "memory_percent": 92.0,
+                "swap_percent": 0.0,
+            }),
+            result("get_disk_usage", {"path": "/", "used_percent": 59.0}),
+            result("get_network_state", {"interfaces": [], "count": 0}),
+            result("get_failed_services", {"failed_services": [], "count": 0}),
+            result("get_recent_errors", {"errors": [], "count": 0}),
+        ],
+    )
+
+    assert report.classification == "system_survey"
+    assert "resource threshold signal(s)" in report.summary
+    assert any("root cause" in item for item in report.hypotheses)
+    assert any("Repeat resource measurements" in item for item in report.next_checks)
+
+
+def test_generic_vietnamese_system_status_uses_system_survey() -> None:
+    report = diagnose_incident(
+        "hệ thống đang trong tình trạng thế nào",
+        [
+            result("get_system_overview", {
+                "cpu_percent": 10.0,
+                "memory_percent": 30.0,
+                "swap_percent": 0.0,
+            }),
+            result("get_disk_usage", {
+                "path": "/", "used_percent": 50.0,
+            }),
+            result("get_network_state", {
+                "interfaces": [{"name": "enp0s3", "is_up": True}],
+                "count": 1,
+            }),
+            result("get_failed_services", {
+                "failed_services": [], "count": 0,
+            }),
+            result("get_recent_errors", {
+                "errors": [], "count": 0, "since_minutes": 60,
+            }),
+        ],
+    )
+
+    assert report.classification == "system_survey"
+    assert any("CPU utilization was 10.0%" in fact for fact in report.confirmed_facts)
+    assert any("Filesystem / was 50.0% used" in fact for fact in report.confirmed_facts)
+

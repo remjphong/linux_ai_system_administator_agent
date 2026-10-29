@@ -86,7 +86,7 @@ class RuleBasedPlanner:
                 "slow", "sluggish", "lag", "laggy", "running slowly",
                 "system slowdown", "hieu nang", "bo nho",
                 "tai nguyen he thong", "cham", "chay cham",
-                "may cham", "may chay cham", "do", "giat",
+                "may cham", "may chay cham", "giat",
                 "ngon ram", "cpu cao", "ram cao",
             ),
         )
@@ -106,6 +106,8 @@ class RuleBasedPlanner:
                 "network interface", "ip address", "packet loss",
                 "mang internet", "ket noi mang", "mang may tinh",
                 "mat ket noi", "dia chi ip", "khong co mang",
+                "trang thai mang", "tinh trang mang", "kiem tra mang",
+                "network status", "network connectivity",
             ),
         )
         # An explicit user URL has priority. For a general network check,
@@ -336,7 +338,11 @@ class RuleBasedPlanner:
 
     @staticmethod
     def _contains_any(request: str, phrases: Sequence[str]) -> bool:
-        return any(phrase in request for phrase in phrases)
+        """Match complete words or phrases, not arbitrary substrings."""
+        return any(
+            re.search(rf"\b{re.escape(phrase)}\b", request) is not None
+            for phrase in phrases
+        )
 
     @staticmethod
     def _explicit_service_name_from_request(request: str) -> str | None:
