@@ -307,6 +307,62 @@ class ListeningPortTool:
             ],
         )
 
+class ListListeningPortsTool:
+    """List every TCP socket in the LISTEN state on this host."""
+
+    spec = ToolSpec(
+        name="list_listening_ports",
+        description=(
+            "List all TCP sockets in the LISTEN state with local address, port, "
+            "and (when visible) owning PID. Complements inspect_listening_port "
+            "by reporting every listener in one call."
+        ),
+    )
+
+    def execute(self, **kwargs: Any) -> ToolResult:
+        del kwargs
+        try:
+            connections = psutil.net_connections(kind="inet")
+        except (OSError, psutil.Error) as exc:
+            return ToolResult(
+                tool_name=self.spec.name,
+                status="failed",
+                error=f"Could not enumerate sockets ({type(exc).__name__}).",
+            )
+
+        sockets: list[dict[str, Any]] = []
+        for connection in connections:
+            if connection.status != psutil.CONN_LISTEN:
+                continue
+            local_address = connection.laddr
+            if not local_address:
+                continue
+            ip = getattr(local_address, "ip", None)
+            port = getattr(local_address, "port", None)
+            if port is None and isinstance(local_address, tuple) and len(local_address) > 1:
+                ip, port = local_address[0], local_address[1]
+            if not isinstance(port, int) or isinstance(port, bool):
+                continue
+            sockets.append(
+                {
+                    "protocol": "tcp",
+                    "local_address": str(ip or ""),
+                    "local_port": int(port),
+                    "pid": connection.pid,
+                }
+            )
+
+        sockets.sort(key=lambda item: (item["local_port"], item["local_address"]))
+        return ToolResult(
+            tool_name=self.spec.name,
+            status="success",
+            data={"count": len(sockets), "sockets": sockets},
+            evidence=[
+                f"Found {len(sockets)} TCP listening socket(s); "
+                "no network state was changed."
+            ],
+        )
+
 
 def build_tools() -> list[object]:
     return [
@@ -314,4 +370,6 @@ def build_tools() -> list[object]:
         TcpConnectivityTool(),
         HttpEndpointTool(),
         ListeningPortTool(),
+        ListListeningPortsTool(),
     ]
+
