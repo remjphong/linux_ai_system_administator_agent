@@ -33,7 +33,26 @@ from linux_admin.verification import (
     VerifyEndpointTool,
     VerifyServiceHealthTool,
 )
-
+from linux_admin.tools.logs import (
+    AuthLogTool,
+    FailedServicesTool,
+    KernelLogTool,
+    RecentErrorsTool,
+    ServiceLogsTool,
+)
+from linux_admin.tools.network import (
+    HttpEndpointTool,
+    ListListeningPortsTool,
+    NetworkStateTool,
+    TcpConnectivityTool,
+)
+from linux_admin.tools.system import (
+    DiskUsageTool,
+    IoStatsTool,
+    ListAllMountsTool,
+    SystemOverviewTool,
+    TopProcessesTool,
+)
 
 class EchoTool:
     spec = ToolSpec(
@@ -626,3 +645,232 @@ def test_listening_port_tool_only_reports_matching_listening_sockets(monkeypatch
     assert result.data["count"] == 1
     assert result.data["listeners"][0]["local_address"] == "127.0.0.1"
     assert result.data["listeners"][0]["port"] == 8080
+# ============================================================
+# New system-intelligence tools (Quỳnh — feature/system-intelligence)
+# ============================================================
+
+
+def test_top_processes_sort_by_cpu() -> None:
+    result = TopProcessesTool().execute(limit=3, sort_by="cpu")
+    assert result.ok is True
+    assert "processes" in result.data
+    assert result.data["sort_by"] == "cpu_percent"
+    assert len(result.data["processes"]) <= 3
+    for proc in result.data["processes"]:
+        assert "cpu_percent" in proc
+
+
+def test_top_processes_sort_by_both_returns_two_lists() -> None:
+    result = TopProcessesTool().execute(limit=3, sort_by="both")
+    assert result.ok is True
+    assert "top_cpu" in result.data
+    assert "top_memory" in result.data
+    assert len(result.data["top_cpu"]) <= 3
+    assert len(result.data["top_memory"]) <= 3
+
+
+def test_top_processes_rejects_invalid_sort_by() -> None:
+    result = TopProcessesTool().execute(sort_by="threads")
+    assert result.status == "invalid_input"
+
+
+def test_list_all_mounts_returns_mounts() -> None:
+    result = ListAllMountsTool().execute()
+    assert result.ok is True
+    assert isinstance(result.data["mounts"], list)
+    assert result.data["mount_count"] == len(result.data["mounts"])
+    for mount in result.data["mounts"]:
+        assert "device" in mount
+        assert "mount_point" in mount
+        assert "fstype" in mount
+
+
+def test_io_stats_rejects_invalid_sample_seconds() -> None:
+    tool = IoStatsTool()
+    assert tool.execute(sample_seconds=0).status == "invalid_input"
+    assert tool.execute(sample_seconds=10).status == "invalid_input"
+    assert tool.execute(sample_seconds="1").status == "invalid_input"
+
+
+def test_io_stats_returns_disk_and_iowait_or_reports_unsupported() -> None:
+    result = IoStatsTool().execute(sample_seconds=0.1)
+    if result.ok:
+        assert "disk_stats" in result.data
+        assert "io_wait_percent" in result.data
+        assert isinstance(result.data["disk_stats"], list)
+    else:
+        # Some container/CI environments lack disk counters.
+        assert result.data.get("supported") is False
+
+
+def test_list_listening_ports_filters_to_listen_only(monkeypatch) -> None:
+    import psutil
+
+    import linux_admin.tools.network as network_module
+
+    sockets = [
+        SimpleNamespace(
+            status=psutil.CONN_LISTEN,
+            laddr=SimpleNamespace(ip="127.0.0.1", port=22),
+            pid=1,
+        ),
+        SimpleNamespace(
+            status=psutil.CONN_LISTEN,
+            laddr=SimpleNamespace(ip="0.0.0.0", port=80),
+            pid=2,
+        ),
+        SimpleNamespace(
+            status=psutil.CONN_ESTABLISHED,
+            laddr=SimpleNamespace(ip="127.0.0.1", port=22),
+            pid=3,
+        ),
+    ]
+    monkeypatch.setattr(
+        network_module.psutil,
+        "net_connections",
+        lambda kind: sockets,
+    )
+
+    result = ListListeningPortsTool().execute()
+    assert result.ok is True
+    assert result.data["count"] == 2
+    ports = {item["local_port"] for item in result.data["sockets"]}
+    assert ports == {22, 80}
+
+
+def test_kernel_log_parses_messages(monkeypatch) -> None:
+    import linux_admin.tools.logs as logs_module
+
+    monkeypatch.setattr(logs_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(logs_module.shutil, "which", lambda _name: "/usr/bin/journalctl")
+    monkeypatch.setattr(
+        logs_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "2026-11-18T09:00:00 host kernel: Out of memory: Killed process 1234 (python3)\n"
+                "2026-11-18T09:01:00 host kernel: EXT4-fs error (device sda1)\n"
+            ),
+            stderr="",
+        ),
+    )
+    result = KernelLogTool().execute(lines=50)
+    assert result.ok is True
+    assert result.data["line_count"] == 2
+    assert result.data["priority"] == "err"
+    assert any("Out of memory" in msg for msg in result.data["messages"])
+
+
+def test_kernel_log_handles_no_entries(monkeypatch) -> None:
+    import linux_admin.tools.logs as logs_module
+
+    monkeypatch.setattr(logs_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(logs_module.shutil, "which", lambda _name: "/usr/bin/journalctl")
+    monkeypatch.setattr(
+        logs_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout="-- No entries --\n", stderr=""
+        ),
+    )
+    result = KernelLogTool().execute()
+    assert result.ok is True
+    assert result.data["messages"] == []
+    assert result.data["line_count"] == 0
+
+
+def test_kernel_log_rejects_invalid_priority() -> None:
+    assert KernelLogTool().execute(priority="fatal").status == "invalid_input"
+    assert KernelLogTool().execute(lines=0).status == "invalid_input"
+
+
+def test_auth_log_detects_brute_force(monkeypatch) -> None:
+    import linux_admin.tools.logs as logs_module
+
+    monkeypatch.setattr(logs_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(logs_module.shutil, "which", lambda _name: "/usr/bin/journalctl")
+    lines = "\n".join(
+        f"2026-11-18T09:00:{i:02d} host sshd[1]: Failed password for root "
+        f"from 1.2.3.4 port {10000 + i} ssh2"
+        for i in range(15)
+    )
+    monkeypatch.setattr(
+        logs_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=lines, stderr=""),
+    )
+    result = AuthLogTool().execute(lines=100, since_minutes=60)
+    assert result.ok is True
+    assert result.data["failed_login_count"] == 15
+    assert result.data["brute_force_suspected"] is True
+    assert result.data["top_source_ips"][0]["ip"] == "1.2.3.4"
+    assert result.data["top_source_ips"][0]["failure_count"] == 15
+
+
+def test_auth_log_no_brute_force_below_threshold(monkeypatch) -> None:
+    import linux_admin.tools.logs as logs_module
+
+    monkeypatch.setattr(logs_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(logs_module.shutil, "which", lambda _name: "/usr/bin/journalctl")
+    lines = "\n".join(
+        f"2026-11-18T09:00:{i:02d} host sshd[1]: Failed password for bob "
+        f"from 5.6.7.8 port {10000 + i} ssh2"
+        for i in range(5)
+    )
+    monkeypatch.setattr(
+        logs_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=lines, stderr=""),
+    )
+    result = AuthLogTool().execute()
+    assert result.ok is True
+    assert result.data["failed_login_count"] == 5
+    assert result.data["brute_force_suspected"] is False
+
+
+def test_auth_log_counts_successful_logins(monkeypatch) -> None:
+    import linux_admin.tools.logs as logs_module
+
+    monkeypatch.setattr(logs_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(logs_module.shutil, "which", lambda _name: "/usr/bin/journalctl")
+    monkeypatch.setattr(
+        logs_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "2026-11-18T09:00:00 host sshd[1]: Accepted publickey for alice "
+                "from 1.2.3.4 port 22 ssh2\n"
+            ),
+            stderr="",
+        ),
+    )
+    result = AuthLogTool().execute()
+    assert result.ok is True
+    assert result.data["successful_login_count"] == 1
+    assert result.data["failed_login_count"] == 0
+
+
+def test_auth_log_rejects_invalid_inputs() -> None:
+    assert AuthLogTool().execute(lines=0).status == "invalid_input"
+    assert AuthLogTool().execute(since_minutes=0).status == "invalid_input"
+    assert AuthLogTool().execute(brute_force_threshold=0).status == "invalid_input"
+
+
+def test_new_read_only_tools_are_registered(app_config) -> None:
+    registry = register_builtin_tools(ToolRegistry(), app_config)
+    names = {spec.name for spec in registry.list_tools()}
+    expected_new = {
+        "list_all_mounts",
+        "get_io_stats",
+        "list_listening_ports",
+        "get_kernel_log",
+        "check_auth_log",
+    }
+    assert expected_new <= names
+    for tool_name in expected_new:
+        spec = registry.get_spec(tool_name)
+        assert spec is not None
+        assert spec.changes_system is False
+        assert spec.risk_level == "read_only"

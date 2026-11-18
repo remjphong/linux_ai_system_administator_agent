@@ -236,5 +236,275 @@ class RecentErrorsTool:
         )
 
 
+class KernelLogTool:
+    """Read kernel log entries filtered by priority via journalctl --dmesg."""
+
+    spec = ToolSpec(
+        name="get_kernel_log",
+        description=(
+            "Read bounded kernel log entries from journalctl --dmesg filtered by "
+            "priority. Use priority='err' (default) to surface OOM kills, hardware "
+            "errors, and EXT4 failures without pulling the full ring buffer."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "lines": {"type": "integer", "minimum": 1, "maximum": _MAX_LINES},
+                "since_minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": _MAX_SINCE_MINUTES,
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["emerg", "alert", "crit", "err", "warning"],
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+    )
+
+    _PRIORITY_MAP = {
+        "emerg": "0",
+        "alert": "1",
+        "crit": "2",
+        "err": "3",
+        "warning": "4",
+    }
+
+    def execute(
+        self,
+        lines: int = 100,
+        since_minutes: int = 60,
+        priority: str = "err",
+        **kwargs: Any,
+    ) -> ToolResult:
+        del kwargs
+        if isinstance(lines, bool) or not isinstance(lines, int) or not 1 <= lines <= _MAX_LINES:
+            return ToolResult(
+                tool_name=self.spec.name,
+                status="invalid_input",
+                error=f"lines must be between 1 and {_MAX_LINES}.",
+            )
+        if (
+            isinstance(since_minutes, bool)
+            or not isinstance(since_minutes, int)
+            or not 1 <= since_minutes <= _MAX_SINCE_MINUTES
+        ):
+            return ToolResult(
+                tool_name=self.spec.name,
+                status="invalid_input",
+                error=f"since_minutes must be between 1 and {_MAX_SINCE_MINUTES}.",
+            )
+        if priority not in self._PRIORITY_MAP:
+            return ToolResult(
+                tool_name=self.spec.name,
+                status="invalid_input",
+                error=f"priority must be one of: {sorted(self._PRIORITY_MAP)}.",
+            )
+
+        completed, error = _run_linux_command(
+            self.spec.name,
+            "journalctl",
+            [
+                "--dmesg",
+                f"--priority={self._PRIORITY_MAP[priority]}",
+                "--since",
+                f"{since_minutes} minutes ago",
+                "--no-pager",
+                "--output=short-iso",
+                f"--lines={lines}",
+            ],
+        )
+        if error is not None:
+            return error
+        assert completed is not None
+        entries = completed.stdout.splitlines()
+        if len(entries) == 1 and entries[0].strip() == "-- No entries --":
+            entries = []
+        entries = entries[-lines:]
+        return ToolResult(
+            tool_name=self.spec.name,
+            status="success",
+            data={
+                "messages": entries,
+                "line_count": len(entries),
+                "priority": priority,
+                "since_minutes": since_minutes,
+            },
+            evidence=[
+                f"Read {len(entries)} kernel log entr(y/ies) at priority >= {priority}."
+            ],
+        )
+
+
+class AuthLogTool:
+    """Analyze recent SSH/auth journal entries for login anomalies and brute force."""
+
+    spec = ToolSpec(
+        name="check_auth_log",
+        description=(
+            "Scan recent ssh/sshd/systemd-logind journal entries for failed logins, "
+            "successful logins, sudo events, and per-source-IP failure counts. "
+            "Flags brute-force suspicion when a single IP reaches the threshold."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "lines": {"type": "integer", "minimum": 1, "maximum": _MAX_LINES},
+                "since_minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": _MAX_SINCE_MINUTES,
+                },
+                "brute_force_threshold": {
+                    "type": "integer",
+                    "minimum": 3,
+                    "maximum": 100,
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+    )
+
+    _FAIL_PATTERN = re.compile(
+        r"(Failed password|Invalid user|authentication failure|"
+        r"pam_unix.*authentication failure)",
+        re.IGNORECASE,
+    )
+    _SUCCESS_PATTERN = re.compile(
+        r"(Accepted (password|publickey)|session opened for user)",
+        re.IGNORECASE,
+    )
+    _IP_PATTERN = re.compile(r"from\s+(\d{1,3}(?:\.\d{1,3}){3})")
+    _SUDO_PATTERN = re.compile(r"\bsudo\b", re.IGNORECASE)
+
+    def execute(
+        self,
+        lines: int = 200,
+        since_minutes: int = 60,
+        brute_force_threshold: int = 10,
+        **kwargs: Any,
+    ) -> ToolResult:
+        del kwargs
+        if isinstance(lines, bool) or not isinstance(lines, int) or not 1 <= lines <= _MAX_LINES:
+            return ToolResult(
+                tool_name=self.spec.name,
+                status="invalid_input",
+                error=f"lines must be between 1 and {_MAX_LINES}.",
+            )
+        if (
+            isinstance(since_minutes, bool)
+            or not isinstance(since_minutes, int)
+            or not 1 <= since_minutes <= _MAX_SINCE_MINUTES
+        ):
+            return ToolResult(
+                tool_name=self.spec.name,
+                status="invalid_input",
+                error=f"since_minutes must be between 1 and {_MAX_SINCE_MINUTES}.",
+            )
+        if (
+            isinstance(brute_force_threshold, bool)
+            or not isinstance(brute_force_threshold, int)
+            or not 3 <= brute_force_threshold <= 100
+        ):
+            return ToolResult(
+                tool_name=self.spec.name,
+                status="invalid_input",
+                error="brute_force_threshold must be between 3 and 100.",
+            )
+
+        completed, error = _run_linux_command(
+            self.spec.name,
+            "journalctl",
+            [
+                "--unit",
+                "ssh",
+                "--unit",
+                "sshd",
+                "--unit",
+                "systemd-logind",
+                "--since",
+                f"{since_minutes} minutes ago",
+                "--no-pager",
+                "--output=short-iso",
+                f"--lines={lines}",
+            ],
+        )
+        if error is not None:
+            return error
+        assert completed is not None
+        entries = completed.stdout.splitlines()
+        if len(entries) == 1 and entries[0].strip() == "-- No entries --":
+            entries = []
+
+        failed_count = 0
+        success_count = 0
+        sudo_count = 0
+        per_ip: dict[str, int] = {}
+        recent_failures: list[str] = []
+
+        for line in entries:
+            if self._SUDO_PATTERN.search(line):
+                sudo_count += 1
+            if self._FAIL_PATTERN.search(line):
+                failed_count += 1
+                match = self._IP_PATTERN.search(line)
+                if match:
+                    ip = match.group(1)
+                    per_ip[ip] = per_ip.get(ip, 0) + 1
+                recent_failures.append(line[:500])
+            elif self._SUCCESS_PATTERN.search(line):
+                success_count += 1
+
+        top_ips = sorted(per_ip.items(), key=lambda kv: kv[1], reverse=True)[:10]
+        top_source_ips = [
+            {"ip": ip, "failure_count": count} for ip, count in top_ips
+        ]
+        suspicious_ips = [
+            item
+            for item in top_source_ips
+            if item["failure_count"] >= brute_force_threshold
+        ]
+
+        return ToolResult(
+            tool_name=self.spec.name,
+            status="success",
+            data={
+                "window_minutes": since_minutes,
+                "scanned_line_count": len(entries),
+                "failed_login_count": failed_count,
+                "successful_login_count": success_count,
+                "sudo_event_count": sudo_count,
+                "top_source_ips": top_source_ips,
+                "suspicious_ips": suspicious_ips,
+                "brute_force_suspected": bool(suspicious_ips),
+                "brute_force_threshold": brute_force_threshold,
+                "recent_failures": recent_failures[-20:],
+            },
+            evidence=[
+                f"Scanned {len(entries)} auth-related journal line(s).",
+                (
+                    f"Failed logins: {failed_count}; successful: {success_count}; "
+                    f"sudo events: {sudo_count}."
+                ),
+                (
+                    f"Brute-force pattern suspected from {len(suspicious_ips)} "
+                    f"source IP(s) (threshold: {brute_force_threshold})."
+                    if suspicious_ips
+                    else "No source IP exceeded the brute-force threshold."
+                ),
+            ],
+        )
+
+
 def build_tools() -> list[object]:
-    return [FailedServicesTool(), ServiceLogsTool(), RecentErrorsTool()]
+    return [
+        FailedServicesTool(),
+        ServiceLogsTool(),
+        RecentErrorsTool(),
+        KernelLogTool(),
+        AuthLogTool(),
+    ]
