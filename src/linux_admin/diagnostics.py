@@ -1383,6 +1383,34 @@ def synthesize_specialized_evidence(
                     if util is not None and util >= resource_threshold_percent:
                         device = str(entry.get("device", "unknown"))[:80]
                         fact(f"Device {device} reported {util:.1f}% busy in this sample.")
+            processes = data.get("process_io_stats")
+            if isinstance(processes, list):
+                sampled = data.get("process_io_sampled_count")
+                if type(sampled) is int and sampled >= 0:
+                    fact(f"Per-process I/O counters yielded {sampled} valid two-snapshot record(s).")
+                for entry in processes[:3]:
+                    if not isinstance(entry, dict):
+                        continue
+                    pid = entry.get("pid")
+                    read_rate = entry.get("read_bytes_per_sec")
+                    write_rate = entry.get("write_bytes_per_sec")
+                    if (
+                        type(pid) is int and pid > 0
+                        and type(read_rate) in (int, float) and read_rate >= 0
+                        and type(write_rate) in (int, float) and write_rate >= 0
+                    ):
+                        name = str(entry.get("name") or "unknown")[:80]
+                        fact(
+                            f"PID {pid} ({name}) observed read {read_rate:g} B/s "
+                            f"and write {write_rate:g} B/s in the sampled window."
+                        )
+                if processes:
+                    hypothesis(
+                        "Observed process read/write deltas do not prove which "
+                        "process caused CPU iowait or device contention."
+                    )
+                elif data.get("process_io_supported") is False:
+                    fact("Per-process read/write observations were unavailable or insufficient for comparison.")
             hypothesis("A short I/O sample does not establish sustained contention or its cause.")
             next_check("Repeat I/O samples during the symptom and correlate with application latency.")
         elif tool_name == "list_listening_ports":

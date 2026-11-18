@@ -868,3 +868,141 @@ def test_new_read_only_tools_are_registered(app_config) -> None:
         assert spec is not None
         assert spec.changes_system is False
         assert spec.risk_level == "read_only"
+
+
+# COMPLETION-FIX-01 U-01 — bounded per-process I/O observations (offline).
+def _u01_fake_io(monkeypatch, snapshots, *, device_reset=False):
+    from collections import namedtuple
+
+    import psutil
+
+    import linux_admin.tools.system as system_module
+
+    Disk = namedtuple("Disk", "read_count write_count read_bytes write_bytes busy_time")
+    Cpu = namedtuple("Cpu", "user system iowait")
+    disk_calls = iter([
+        {"sda": Disk(10, 10, 100, 200, 100)},
+        {"sda": Disk(9 if device_reset else 20, 20, 300, 600, 150)},
+    ])
+    cpu_calls = iter([Cpu(100, 100, 5), Cpu(110, 115, 6)])
+    process_calls = iter(snapshots)
+
+    class FakeProcess:
+        def __init__(self, item):
+            self.info = {key: item.get(key) for key in ("pid", "name", "username", "create_time")}
+            self._item = item
+
+        def io_counters(self):
+            if self._item.get("denied"):
+                raise psutil.AccessDenied(pid=self.info["pid"])
+            if self._item.get("unsupported"):
+                raise NotImplementedError("process IO unsupported")
+            if self._item.get("missing"):
+                return SimpleNamespace(read_bytes=None, write_bytes=None)
+            return SimpleNamespace(
+                read_bytes=self._item["read_bytes"],
+                write_bytes=self._item["write_bytes"],
+            )
+
+    monkeypatch.setattr(system_module.psutil, "disk_io_counters", lambda perdisk: next(disk_calls))
+    monkeypatch.setattr(system_module.psutil, "cpu_times", lambda: next(cpu_calls))
+    monkeypatch.setattr(system_module.psutil, "process_iter", lambda attrs: [FakeProcess(p) for p in next(process_calls)])
+    monkeypatch.setattr(system_module.time, "sleep", lambda seconds: None)
+
+
+def test_u01_process_io_normal_bounded_and_device_preserved(monkeypatch):
+    before = [
+        {"pid": 101, "name": "reader", "username": "dev", "create_time": 50.0,
+         "read_bytes": 100, "write_bytes": 20},
+        {"pid": 202, "name": "writer", "username": "dev", "create_time": 51.0,
+         "read_bytes": 10, "write_bytes": 100},
+    ]
+    after = [
+        dict(before[0], read_bytes=300, write_bytes=40),
+        dict(before[1], read_bytes=30, write_bytes=500),
+    ]
+    _u01_fake_io(monkeypatch, [before, after])
+    result = IoStatsTool().execute(sample_seconds=1.0)
+    assert result.ok
+    assert result.data["device_count"] == 1
+    assert result.data["disk_stats"][0]["read_iops"] == 10.0
+    assert result.data["io_wait_percent"] == 3.85
+    assert result.data["process_io_supported"] is True
+    assert result.data["process_io_sampled_count"] == 2
+    assert [p["pid"] for p in result.data["process_io_stats"]] == [202, 101]
+    assert result.data["process_io_stats"][0]["write_bytes_delta"] == 400
+    assert result.data["process_io_stats"][1]["read_bytes_per_sec"] == 200.0
+
+
+def test_u01_missing_or_permission_limited_is_not_fabricated(monkeypatch):
+    before = [
+        {"pid": 101, "create_time": 50.0, "name": "private", "denied": True},
+        {"pid": 202, "create_time": 50.0, "name": "unknown", "missing": True},
+        {"pid": 303, "create_time": 50.0, "name": "unsupported", "unsupported": True},
+    ]
+    _u01_fake_io(monkeypatch, [before, before])
+    result = IoStatsTool().execute(sample_seconds=0.1)
+    assert result.ok
+    assert result.data["process_io_stats"] == []
+    assert result.data["process_io_supported"] is False
+    assert result.data["process_io_inaccessible_count"] >= 6
+    assert result.data["device_count"] == 1
+
+
+def test_u01_terminated_and_reused_pids_are_excluded(monkeypatch):
+    before = [
+        {"pid": 101, "name": "old", "create_time": 50.0,
+         "read_bytes": 100, "write_bytes": 200},
+        {"pid": 102, "name": "gone", "create_time": 40.0,
+         "read_bytes": 100, "write_bytes": 200},
+    ]
+    after = [{"pid": 101, "name": "new", "create_time": 51.0,
+              "read_bytes": 900, "write_bytes": 900}]
+    _u01_fake_io(monkeypatch, [before, after])
+    result = IoStatsTool().execute(sample_seconds=0.1)
+    assert result.ok
+    assert result.data["process_io_sampled_count"] == 0
+    assert result.data["process_io_stats"] == []
+
+
+def test_u01_process_io_scan_and_report_are_bounded(monkeypatch):
+    before = [
+        {"pid": pid, "name": f"process-{pid}", "create_time": float(pid),
+         "read_bytes": 0, "write_bytes": 0}
+        for pid in range(1, 301)
+    ]
+    after = [dict(item, read_bytes=item["pid"] * 100) for item in before]
+    _u01_fake_io(monkeypatch, [before, after])
+    result = IoStatsTool().execute(sample_seconds=0.1)
+    assert result.ok
+    assert result.data["process_io_scan_limit"] == 256
+    assert result.data["process_io_sampled_count"] == 256
+    assert len(result.data["process_io_stats"]) == 10
+    assert result.data["process_io_stats"][0]["pid"] == 256
+
+
+def test_u01_process_enumeration_unsupported_keeps_device_observations(monkeypatch):
+    import linux_admin.tools.system as system_module
+
+    _u01_fake_io(monkeypatch, [[], []])
+    def unsupported_process_iter(attrs):
+        raise NotImplementedError("unsupported")
+    monkeypatch.setattr(system_module.psutil, "process_iter", unsupported_process_iter)
+    result = IoStatsTool().execute(sample_seconds=0.1)
+    assert result.ok
+    assert result.data["device_count"] == 1
+    assert result.data["process_io_supported"] is False
+    assert result.data["process_io_stats"] == []
+
+
+def test_u01_negative_counter_delta_is_not_reported(monkeypatch):
+    before = [{"pid": 101, "name": "reset", "create_time": 50.0,
+               "read_bytes": 500, "write_bytes": 200}]
+    after = [dict(before[0], read_bytes=100, write_bytes=300)]
+    _u01_fake_io(monkeypatch, [before, after], device_reset=True)
+    result = IoStatsTool().execute(sample_seconds=0.1)
+    assert result.ok
+    assert result.data["process_io_counter_reset_count"] == 1
+    assert result.data["process_io_stats"] == []
+    assert result.data["device_count"] == 0
+    assert result.data["io_wait_percent"] is not None
