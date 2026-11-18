@@ -541,3 +541,43 @@ def test_r02_failed_tools_never_generate_synthetic_success_facts():
     )
     assert any("returned status failed" in f for f in findings)
     assert not any("100 failed" in f or "OOM-related" in f for f in findings)
+
+
+# COMPLETION-FIX-01 U-01: only observed process deltas become facts.
+def test_u01_diagnostic_process_observations_do_not_prove_causality():
+    findings = synthesize_specialized_evidence("Inspect disk I/O wait", [
+        result("get_io_stats", {
+            "sample_seconds": 1.0, "io_wait_percent": 20.0,
+            "disk_stats": [{"device": "sda", "util_percent": 30.0}],
+            "process_io_stats": [{"pid": 123, "name": "worker", "read_bytes_per_sec": 500,
+                                  "write_bytes_per_sec": 100}],
+            "process_io_sampled_count": 1, "process_io_supported": True,
+        }),
+    ])
+    assert any("PID 123" in f and "500 B/s" in f for f in findings)
+    assert any("do not prove" in f for f in findings if f.startswith("Unconfirmed"))
+    assert not any("caused CPU iowait" in f for f in findings if f.startswith("Confirmed"))
+
+
+def test_u01_diagnostic_missing_process_io_is_disclosed_without_pid():
+    findings = synthesize_specialized_evidence("Inspect disk I/O wait", [
+        result("get_io_stats", {
+            "sample_seconds": 0.1, "io_wait_percent": 15.0, "disk_stats": [],
+            "process_io_stats": [], "process_io_sampled_count": 0,
+            "process_io_supported": False,
+        }),
+    ])
+    assert any("unavailable or insufficient" in f for f in findings)
+    assert not any("PID " in f for f in findings)
+
+
+def test_u01_failed_io_tool_never_generates_process_fact():
+    findings = synthesize_specialized_evidence("Inspect disk I/O wait", [
+        result("get_io_stats", {
+            "process_io_stats": [{"pid": 5, "name": "fake", "read_bytes_per_sec": 50,
+                                  "write_bytes_per_sec": 5}],
+            "process_io_sampled_count": 1,
+        }, status="failed"),
+    ])
+    assert not any("PID 5" in f for f in findings)
+    assert any("returned status failed" in f for f in findings)

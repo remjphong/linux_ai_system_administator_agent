@@ -346,6 +346,52 @@ class IoStatsTool:
         },
     )
 
+    # Observe at most a bounded number of processes. Counters are read-only;
+    # absent permissions/counters simply reduce evidence coverage.
+    _PROCESS_SCAN_LIMIT = 256
+    _PROCESS_RESULT_LIMIT = 10
+
+    @classmethod
+    def _process_io_snapshot(cls) -> tuple[dict[int, dict[str, Any]], int]:
+        snapshot: dict[int, dict[str, Any]] = {}
+        inaccessible = 0
+        try:
+            iterator = psutil.process_iter(
+                attrs=["pid", "name", "username", "create_time"]
+            )
+            for index, process in enumerate(iterator):
+                if index >= cls._PROCESS_SCAN_LIMIT:
+                    break
+                try:
+                    info = process.info
+                    pid = info.get("pid")
+                    created = info.get("create_time")
+                    if type(pid) is not int or pid <= 0 or type(created) not in (int, float):
+                        inaccessible += 1
+                        continue
+                    io = process.io_counters()
+                    read_bytes = getattr(io, "read_bytes", None)
+                    write_bytes = getattr(io, "write_bytes", None)
+                    if (
+                        type(read_bytes) is not int or read_bytes < 0
+                        or type(write_bytes) is not int or write_bytes < 0
+                    ):
+                        inaccessible += 1
+                        continue
+                    snapshot[pid] = {
+                        "created": float(created),
+                        "name": str(info.get("name") or "unknown")[:128],
+                        "username": str(info.get("username") or "unknown")[:128],
+                        "read_bytes": read_bytes,
+                        "write_bytes": write_bytes,
+                    }
+                except (OSError, psutil.Error, AttributeError, NotImplementedError, ValueError):
+                    inaccessible += 1
+        except (OSError, psutil.Error, AttributeError, NotImplementedError, ValueError):
+            # psutil may not expose process I/O on this platform.
+            return snapshot, inaccessible + 1
+        return snapshot, inaccessible
+
     def execute(
         self, sample_seconds: float = 1.0, **kwargs: Any
     ) -> ToolResult:
@@ -383,6 +429,7 @@ class IoStatsTool:
                 data={"supported": False},
             )
 
+        process_before, inaccessible_before = self._process_io_snapshot()
         time.sleep(window)
 
         try:
@@ -401,6 +448,35 @@ class IoStatsTool:
                 error="Disk I/O counters disappeared between samples.",
             )
 
+        process_after, inaccessible_after = self._process_io_snapshot()
+        process_records: list[dict[str, Any]] = []
+        process_counter_resets = 0
+        for pid, first in process_before.items():
+            second = process_after.get(pid)
+            if second is None or second["created"] != first["created"]:
+                # Process disappeared or PID was reused; no valid rate.
+                continue
+            read_delta = second["read_bytes"] - first["read_bytes"]
+            write_delta = second["write_bytes"] - first["write_bytes"]
+            if read_delta < 0 or write_delta < 0:
+                process_counter_resets += 1
+                continue
+            process_records.append({
+                "pid": pid,
+                "name": first["name"],
+                "username": first["username"],
+                "read_bytes_delta": read_delta,
+                "write_bytes_delta": write_delta,
+                "read_bytes_per_sec": round(read_delta / window, 2),
+                "write_bytes_per_sec": round(write_delta / window, 2),
+            })
+        process_records.sort(
+            key=lambda item: (
+                -(item["read_bytes_delta"] + item["write_bytes_delta"]),
+                item["pid"],
+            )
+        )
+
         devices: list[dict[str, Any]] = []
         for name in sorted(set(before_io) & set(after_io)):
             before = before_io[name]
@@ -409,13 +485,17 @@ class IoStatsTool:
             d_write = after.write_count - before.write_count
             d_read_bytes = after.read_bytes - before.read_bytes
             d_write_bytes = after.write_bytes - before.write_bytes
+            if min(d_read, d_write, d_read_bytes, d_write_bytes) < 0:
+                # Device counter reset/disappearance cannot yield valid rates.
+                continue
 
             util_percent: float | None = None
             if hasattr(before, "busy_time") and hasattr(after, "busy_time"):
                 d_busy_ms = after.busy_time - before.busy_time
-                util_percent = round(
-                    min(100.0, d_busy_ms / (window * 1000.0) * 100.0), 2
-                )
+                if d_busy_ms >= 0:
+                    util_percent = round(
+                        min(100.0, d_busy_ms / (window * 1000.0) * 100.0), 2
+                    )
 
             devices.append(
                 {
@@ -436,7 +516,7 @@ class IoStatsTool:
             total_after = float(sum(after_cpu))
             delta_total = total_after - total_before
             delta_iowait = float(after_cpu.iowait) - float(before_cpu.iowait)
-            if delta_total > 0:
+            if delta_total > 0 and 0 <= delta_iowait <= delta_total:
                 iowait_percent = round(delta_iowait / delta_total * 100.0, 2)
 
         return ToolResult(
@@ -447,10 +527,17 @@ class IoStatsTool:
                 "io_wait_percent": iowait_percent,
                 "disk_stats": devices,
                 "device_count": len(devices),
+                "process_io_stats": process_records[:self._PROCESS_RESULT_LIMIT],
+                "process_io_sampled_count": len(process_records),
+                "process_io_inaccessible_count": inaccessible_before + inaccessible_after,
+                "process_io_counter_reset_count": process_counter_resets,
+                "process_io_supported": bool(process_records),
+                "process_io_scan_limit": self._PROCESS_SCAN_LIMIT,
             },
             evidence=[
-                (f"Sampled disk I/O and CPU iowait over {window:g} second(s); "
-                 "no device was modified.")
+                (f"Sampled disk I/O, CPU iowait, and bounded per-process "
+                 f"read/write counters over {window:g} second(s); "
+                 "no device or process was modified.")
             ],
         )
 def build_tools() -> list[object]:
