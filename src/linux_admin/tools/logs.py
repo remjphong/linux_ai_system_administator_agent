@@ -12,7 +12,7 @@ import re
 import shutil
 import subprocess
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, ClassVar
 
 from linux_admin.contracts import ToolResult, ToolSpec
 
@@ -265,7 +265,7 @@ class KernelLogTool:
         },
     )
 
-    _PRIORITY_MAP = {
+    _PRIORITY_MAP: ClassVar[dict[str, str]] = {
         "emerg": "0",
         "alert": "1",
         "crit": "2",

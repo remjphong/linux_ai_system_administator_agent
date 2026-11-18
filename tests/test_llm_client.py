@@ -504,3 +504,29 @@ def test_hybrid_plan_does_not_invent_unregistered_tavily_tool(
 
     assert [step.tool_name for step in plan.steps] == ["check_http_endpoint"]
     assert "Tavily không khả dụng" in plan.rationale
+
+def test_r02_llm_relevant_catalog_is_read_only(app_config) -> None:
+    client = _client(app_config)
+    names = [
+        "list_all_mounts", "get_io_stats", "list_listening_ports",
+        "inspect_listening_port", "get_kernel_log", "check_auth_log",
+        "list_top_processes", "get_system_overview",
+    ]
+    tools = [ToolSpec(name=name, description=name) for name in names]
+    tools.append(ToolSpec(
+        name="restart_service", description="never use",
+        risk_level="high", changes_system=True, requires_approval=True,
+    ))
+    cases = [
+        ("Inspect mounted filesystems", "list_all_mounts"),
+        ("Inspect disk I/O", "get_io_stats"),
+        ("List listening ports", "list_listening_ports"),
+        ("Investigate kernel OOM", "get_kernel_log"),
+        ("Investigate SSH failed logins", "check_auth_log"),
+        ("Investigate port 5432", "inspect_listening_port"),
+    ]
+    for request, expected in cases:
+        selected = client._select_relevant_tools(request, tools)
+        names_selected = {tool.name for tool in selected}
+        assert expected in names_selected
+        assert "restart_service" not in names_selected

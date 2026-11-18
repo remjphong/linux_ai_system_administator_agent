@@ -19,20 +19,6 @@ from linux_admin.contracts import (
 )
 from linux_admin.registry import ToolRegistry, ToolRegistryError
 from linux_admin.tools import register_builtin_tools
-from linux_admin.tools.logs import FailedServicesTool, RecentErrorsTool, ServiceLogsTool
-from linux_admin.tools.network import (
-    HttpEndpointTool,
-    NetworkStateTool,
-    TcpConnectivityTool,
-)
-from linux_admin.tools.security import InspectSecurityPostureTool
-from linux_admin.tools.services import RestartServiceTool, ServiceStatusTool
-from linux_admin.tools.system import DiskUsageTool, SystemOverviewTool, TopProcessesTool
-from linux_admin.verification import (
-    RecoveryManager,
-    VerifyEndpointTool,
-    VerifyServiceHealthTool,
-)
 from linux_admin.tools.logs import (
     AuthLogTool,
     FailedServicesTool,
@@ -46,6 +32,8 @@ from linux_admin.tools.network import (
     NetworkStateTool,
     TcpConnectivityTool,
 )
+from linux_admin.tools.security import InspectSecurityPostureTool
+from linux_admin.tools.services import RestartServiceTool, ServiceStatusTool
 from linux_admin.tools.system import (
     DiskUsageTool,
     IoStatsTool,
@@ -53,6 +41,12 @@ from linux_admin.tools.system import (
     SystemOverviewTool,
     TopProcessesTool,
 )
+from linux_admin.verification import (
+    RecoveryManager,
+    VerifyEndpointTool,
+    VerifyServiceHealthTool,
+)
+
 
 class EchoTool:
     spec = ToolSpec(

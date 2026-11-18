@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import unicodedata
 import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
@@ -390,7 +391,11 @@ class OpenAICompatibleLLMClient:
         available_tools: Sequence[ToolSpec],
     ) -> list[ToolSpec]:
         """Select a small read-only tool catalog for the planning prompt."""
-        text = user_request.casefold()
+        normalized = user_request.casefold().replace("đ", "d")
+        text = "".join(
+            char for char in unicodedata.normalize("NFKD", normalized)
+            if not unicodedata.combining(char)
+        )
         by_name = {
             tool.name: tool
             for tool in available_tools
@@ -411,7 +416,6 @@ class OpenAICompatibleLLMClient:
                     "endpoint",
                     "url",
                     "tcp",
-                    "port",
                     "reachable",
                     "connection refused",
                     "connectivity",
@@ -477,6 +481,26 @@ class OpenAICompatibleLLMClient:
             for word in ("security", "permission", "privilege", "posture")
         ):
             add("inspect_security_posture")
+
+        # R02: keep the LLM planning catalog aligned with registered
+        # read-only specialized tools; deterministic rules provide arguments.
+        if any(term in text for term in
+               ("mount", "mounted filesystem", "phan vung")):
+            add("list_all_mounts")
+        if any(term in text for term in
+               ("i/o", "iowait", "io wait", "disk throughput", "disk latency")):
+            add("get_io_stats")
+        if any(term in text for term in
+               ("listening", "listener", "open ports", "list ports",
+                "cong dang lang nghe"))                 or re.search(r"\b(?:port|cong)\s*[:#-]?\s*\d{1,5}\b", text):
+            add("list_listening_ports", "inspect_listening_port")
+        if any(term in text for term in
+               ("kernel", "dmesg", "oom", "out of memory")):
+            add("get_kernel_log")
+        if any(term in text for term in
+               ("ssh", "sshd", "brute force", "failed login", "dang nhap",
+                "authentication")):
+            add("check_auth_log")
 
         # Select external search only when the request explicitly needs it.
         external_research_request = any(

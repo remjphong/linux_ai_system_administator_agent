@@ -358,8 +358,8 @@ class ListListeningPortsTool:
             status="success",
             data={"count": len(sockets), "sockets": sockets},
             evidence=[
-                f"Found {len(sockets)} TCP listening socket(s); "
-                "no network state was changed."
+                (f"Found {len(sockets)} TCP listening socket(s); "
+                 "no network state was changed.")
             ],
         )
 

@@ -265,8 +265,8 @@ class TopProcessesTool:
                 "sort_by": "both",
             },
             evidence=[
-                f"Read {len(top_cpu)} process(es) by CPU and "
-                f"{len(top_memory)} by resident memory."
+                (f"Read {len(top_cpu)} process(es) by CPU and "
+                 f"{len(top_memory)} by resident memory.")
             ],
         )
 class ListAllMountsTool:
@@ -449,8 +449,8 @@ class IoStatsTool:
                 "device_count": len(devices),
             },
             evidence=[
-                f"Sampled disk I/O and CPU iowait over {window:g} second(s); "
-                "no device was modified."
+                (f"Sampled disk I/O and CPU iowait over {window:g} second(s); "
+                 "no device was modified.")
             ],
         )
 def build_tools() -> list[object]:

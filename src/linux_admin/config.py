@@ -72,6 +72,7 @@ class PolicySettings:
     require_approval_for_disruptive_actions: bool
     allow_privilege_escalation: bool
     actions: dict[str, ActionPolicy]
+    resource_threshold_percent: float = 80.0
 
 
 @dataclass(frozen=True)
@@ -393,6 +394,12 @@ def load_config(
     database_path = database_path.resolve()
 
     policy_root = _mapping(policy_file, "policy", "policy.yaml")
+    resource_threshold_percent = _number(
+        policy_root.get("resource_threshold_percent", 80),
+        "policy.resource_threshold_percent",
+        1.0,
+        100.0,
+    )
     default_decision = _string(
         _required(policy_root, "default_decision", "policy.yaml"),
         "policy.default_decision",
@@ -498,6 +505,7 @@ def load_config(
             require_approval_for_disruptive_actions=require_approval,
             allow_privilege_escalation=allow_privilege_escalation,
             actions=parsed_actions,
+            resource_threshold_percent=resource_threshold_percent,
         ),
         services=ServiceSettings(
             allowlist=tuple(raw_allowlist),
