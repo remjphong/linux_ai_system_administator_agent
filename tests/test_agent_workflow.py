@@ -864,3 +864,190 @@ def test_r03_01c_explicit_top5_only_keeps_other_process_defaults(
         TopProcessesTool.spec, dict(process_steps[0].arguments)
     ) is None
     assert all(step.tool_name != "restart_service" for step in plan.steps)
+
+
+# INT-FIX-01 — Execute the real Agent loop against deterministic fake tools.
+INT_FIX_01_URL = "https://example.invalid/health"
+INT_FIX_01_MANY = (
+    "List all mounts, inspect disk I/O wait, "
+    "Liệt kê tất cả port đang LISTEN, kernel OOM, SSH failed login, "
+    f"and check endpoint {INT_FIX_01_URL}"
+)
+
+
+def _int_fix_01_fake_registry(registry_factory, calls):
+    """Use registered read-only fake tools; never touch host/network."""
+    registry = registry_factory(
+        calls=calls,
+        outputs={
+            "check_tcp_connectivity": {
+                "host": "example.invalid", "port": 443, "reachable": True,
+            },
+            "check_http_endpoint": {
+                "url": INT_FIX_01_URL, "host": "example.invalid", "port": 443,
+                "reachable": True, "healthy": True, "status_code": 200,
+            },
+        },
+    )
+
+    class SpecializedFake:
+        def __init__(self, spec):
+            self.spec = spec
+
+        def execute(self, **kwargs):
+            calls.append((self.spec.name, dict(kwargs)))
+            return ToolResult(
+                tool_name=self.spec.name,
+                status="success",
+                data={},
+            )
+
+    for spec in (
+        ListAllMountsTool.spec, IoStatsTool.spec, ListListeningPortsTool.spec,
+        KernelLogTool.spec, AuthLogTool.spec,
+    ):
+        registry.register(SpecializedFake(spec))
+    mutator = StateChangingTestTool()
+    registry.register(mutator)
+    return registry, mutator
+
+
+def test_int_fix_01_mixed_many_explicit_endpoint_executes_first(
+    app_config, audit_logger, registry_factory,
+) -> None:
+    """Original P1 reproduction: five specialized probes starved TCP and HTTP."""
+    assert app_config.agent.max_steps == 5
+    calls = []
+    registry, mutator = _int_fix_01_fake_registry(registry_factory, calls)
+
+    incident = Agent(registry, app_config, audit_logger).run(INT_FIX_01_MANY)
+    executed = [name for name, _ in calls]
+    evidence = [result.tool_name for result in incident.evidence]
+    assert executed[:2] == ["check_tcp_connectivity", "check_http_endpoint"]
+    assert calls[:2] == [
+        ("check_tcp_connectivity", {"host": "example.invalid", "port": 443}),
+        ("check_http_endpoint", {"url": INT_FIX_01_URL}),
+    ]
+    assert evidence == executed
+    assert executed == [
+        "check_tcp_connectivity", "check_http_endpoint",
+        "list_all_mounts", "get_io_stats", "list_listening_ports",
+    ]
+    assert incident.steps == len(calls) == 5
+    assert incident.status == "completed"
+    assert any("Plan limited to 5 steps" in text for text in incident.findings)
+    assert not any(item.tool_name in ("get_kernel_log", "check_auth_log")
+                   for item in incident.evidence)
+    assert not mutator.called
+
+
+def test_int_fix_01_mixed_few_executes_both_endpoint_and_specialized(
+    app_config, audit_logger, registry_factory,
+) -> None:
+    calls = []
+    registry, mutator = _int_fix_01_fake_registry(registry_factory, calls)
+    incident = Agent(registry, app_config, audit_logger).run(
+        f"List all mounts, inspect kernel OOM and check endpoint {INT_FIX_01_URL}"
+    )
+    assert [name for name, _ in calls] == [
+        "check_tcp_connectivity", "check_http_endpoint",
+        "list_all_mounts", "get_kernel_log",
+    ]
+    assert [result.tool_name for result in incident.evidence] == [
+        name for name, _ in calls
+    ]
+    assert incident.steps == 4
+    assert not mutator.called
+
+
+def test_int_fix_01_endpoint_only_executes_tcp_and_http(
+    app_config, audit_logger, registry_factory,
+) -> None:
+    calls = []
+    registry, mutator = _int_fix_01_fake_registry(registry_factory, calls)
+    incident = Agent(registry, app_config, audit_logger).run(
+        f"Check endpoint {INT_FIX_01_URL}"
+    )
+    assert calls == [
+        ("check_tcp_connectivity", {"host": "example.invalid", "port": 443}),
+        ("check_http_endpoint", {"url": INT_FIX_01_URL}),
+    ]
+    assert len(incident.evidence) == incident.steps == 2
+    assert not mutator.called
+
+
+def test_int_fix_01_multi_endpoint_route_remains_bounded(
+    app_config, audit_logger, registry_factory,
+) -> None:
+    from linux_admin.agent import HybridPlanner
+
+    second_url = "http://example.invalid:8080/ready"
+    calls = []
+    registry, mutator = _int_fix_01_fake_registry(registry_factory, calls)
+    unused_llm = FakeLLMClient(
+        default_plan=AgentPlan(steps=(), rationale="Unused LLM plan"),
+    )
+    planner = HybridPlanner(app_config, RuleBasedPlanner(app_config), unused_llm)
+    incident = Agent(registry, app_config, audit_logger, planner=planner).run(
+        f"Check endpoints {INT_FIX_01_URL} and {second_url}"
+    )
+    assert calls == [
+        ("check_http_endpoint", {"url": INT_FIX_01_URL}),
+        ("check_http_endpoint", {"url": second_url}),
+        ("check_tcp_connectivity", {"host": "example.invalid", "port": 443}),
+        ("check_tcp_connectivity", {"host": "example.invalid", "port": 8080}),
+    ]
+    assert [item.tool_name for item in incident.evidence] == [
+        name for name, _ in calls
+    ]
+    assert incident.steps == 4
+    assert not mutator.called
+
+
+def test_int_fix_01_configured_connectivity_is_not_explicit_priority(
+    app_config, audit_logger, registry_factory,
+) -> None:
+    from dataclasses import replace
+
+    configured = replace(
+        app_config,
+        agent=replace(
+            app_config.agent,
+            connectivity_check_url="https://example.invalid/health",
+        ),
+    )
+    calls = []
+    registry, mutator = _int_fix_01_fake_registry(registry_factory, calls)
+    incident = Agent(registry, configured, audit_logger).run(
+        "List all mounts and inspect network connectivity"
+    )
+    names = [name for name, _ in calls]
+    assert names[:3] == [
+        "list_all_mounts", "check_tcp_connectivity", "check_http_endpoint",
+    ]
+    assert [item.tool_name for item in incident.evidence] == names
+    assert incident.steps <= 5
+    assert not mutator.called
+
+
+def test_int_fix_01_hybrid_reports_omitted_checks(
+    app_config, audit_logger, registry_factory,
+) -> None:
+    from linux_admin.agent import HybridPlanner
+
+    calls = []
+    registry, mutator = _int_fix_01_fake_registry(registry_factory, calls)
+    planner = HybridPlanner(
+        app_config,
+        RuleBasedPlanner(app_config),
+        FakeLLMClient(default_plan=AgentPlan(steps=(), rationale="Unused")),
+    )
+    incident = Agent(registry, app_config, audit_logger, planner=planner).run(
+        INT_FIX_01_MANY
+    )
+    assert [name for name, _ in calls][:2] == [
+        "check_tcp_connectivity", "check_http_endpoint",
+    ]
+    assert incident.steps == len(calls) == 5
+    assert any("omitted and not performed" in line for line in incident.findings)
+    assert not mutator.called

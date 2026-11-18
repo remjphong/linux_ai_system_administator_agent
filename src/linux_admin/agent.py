@@ -349,6 +349,15 @@ class RuleBasedPlanner:
                 "Check for failed systemd services",
             )
 
+        # Keep explicitly requested endpoint probes ahead of optional local
+        # diagnostics when the execution step budget is limited. Do not
+        # elevate administrator-configured connectivity probes.
+        if self._url_from_request(user_request):
+            endpoint_tools = {"check_tcp_connectivity", "check_http_endpoint"}
+            candidates.sort(
+                key=lambda step: step.tool_name not in endpoint_tools
+            )
+
         # An unclassified request gets a read-only survey, not an arbitrary
         # service restart, guessed service, or fabricated endpoint.
         if not candidates:
@@ -829,6 +838,12 @@ class HybridPlanner:
                         " Tavily was not added because max_steps=1 cannot "
                         "include both local diagnosis and external research."
                     )
+
+        if len(steps) > max_steps:
+            rationale += (
+                f" Plan limited to {max_steps} steps; additional "
+                "diagnostic checks were omitted and not performed."
+            )
 
         return AgentPlan(
             steps=tuple(steps[:max_steps]),
