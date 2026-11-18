@@ -594,9 +594,10 @@ def _payload_from_result(value: Any) -> dict[str, Any] | None:
 def run_with_dual_report(
     operation: Callable[..., Any],
     *args: Any,
+    output_mode: str = "default",
     **kwargs: Any,
 ) -> Any:
-    """Capture normal print output but preserve interactive approval prompts."""
+    """Capture workflow output and render only the selected terminal view."""
     real_print = builtins.print
     real_input = builtins.input
     events: list[str] = []
@@ -648,13 +649,15 @@ def run_with_dual_report(
     if payload is None:
         payload = _payload_from_result(result)
 
-    # Preserve JSON-only stdout for tests, pipes, and integrations.
-    # Interactive terminals receive the two-section human-readable report.
+    # Preserve the established structured JSON contract for pipes and callers.
     try:
         interactive_terminal = (
             sys.stdout.isatty()
-            or __import__("os").environ.get("LINUX_ADMIN_REPORT", "").lower()
-            == "text"
+            or output_mode == "debug"
+            or (
+                __import__("os").environ.get("LINUX_ADMIN_REPORT", "").lower()
+                == "text"
+            )
         )
     except (AttributeError, OSError):
         interactive_terminal = False
@@ -665,16 +668,32 @@ def run_with_dual_report(
             raise caught_error
         return result
 
-    real_print()
-    real_print("=" * 78)
-    real_print("[1] USER REPORT - BAO CAO CHO NGUOI VAN HANH")
-    real_print("=" * 78)
-    real_print(_render_user_report(payload, result))
+    if output_mode in {"json", "structured"}:
+        if caught_error is not None:
+            raise caught_error
+        return result
 
     real_print()
-    real_print("=" * 78)
-    real_print("[2] DEVELOPER DETAILS - CHI TIET KY THUAT")
-    real_print("=" * 78)
+    if output_mode == "legacy":
+        real_print("=" * 78)
+        real_print("[1] USER REPORT - BAO CAO CHO NGUOI VAN HANH")
+        real_print("=" * 78)
+    real_print(_render_user_report(payload, result))
+
+    if output_mode not in {"debug", "legacy"}:
+        if caught_error is not None:
+            raise caught_error
+        return result
+
+    real_print()
+    if output_mode == "legacy":
+        real_print("=" * 78)
+        real_print("[2] DEVELOPER DETAILS - CHI TIET KY THUAT")
+        real_print("=" * 78)
+    else:
+        real_print("=" * 78)
+        real_print("[2] DEVELOPER DETAILS - CHI TIET KY THUAT")
+        real_print("=" * 78)
 
     detail_events = [
         event for index, event in enumerate(events) if index != payload_index

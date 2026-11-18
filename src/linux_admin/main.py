@@ -66,6 +66,14 @@ def build_parser() -> argparse.ArgumentParser:
             "instead of the default project config directory."
         ),
     )
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument(
+        "--json", action="store_true", help="Print the complete JSON result"
+    )
+    output.add_argument(
+        "--debug", action="store_true",
+        help="Print the operator report and technical details",
+    )
     parser.add_argument(
         "--reason",
         default="Operator-requested service restart",
@@ -240,6 +248,29 @@ def _incident_to_dict(incident: IncidentContext) -> dict[str, Any]:
 
 
 def _run_investigation(
+    agent: Agent,
+    request: str,
+    config: Any,
+    registry: ToolRegistry,
+    audit: AuditLogger | None,
+    *,
+    output_mode: str = "default",
+) -> dict[str, Any]:
+    """Run one investigation and its existing remediation workflow."""
+    from linux_admin.terminal_report import run_with_dual_report
+
+    return run_with_dual_report(
+        _run_investigation_core,
+        agent,
+        request,
+        config,
+        registry,
+        audit,
+        output_mode=output_mode,
+    )
+
+
+def _run_investigation_core(
     agent: Agent,
     request: str,
     config: Any,
@@ -488,9 +519,25 @@ def main() -> int:
             audit_logger = AuditLogger(config.audit.database_path)
 
         if args.investigate:
+            legacy_text = (
+                __import__("os").environ.get("LINUX_ADMIN_REPORT", "").lower()
+                == "text"
+            )
+            if args.json:
+                output_mode = "json"
+            elif legacy_text:
+                output_mode = "legacy"
+            elif args.debug:
+                output_mode = "debug"
+            else:
+                try:
+                    output_mode = "human" if sys.stdout.isatty() else "structured"
+                except (AttributeError, OSError):
+                    output_mode = "structured"
             agent = Agent(registry=registry, config=config, audit=audit_logger)
             output = _run_investigation(
-                agent, args.investigate, config, registry, audit_logger
+                agent, args.investigate, config, registry, audit_logger,
+                output_mode=output_mode,
             )
 
             question = output["remediation"].get("follow_up_question")
@@ -526,7 +573,8 @@ def main() -> int:
                         f"Additional operator context: {answer}"
                     )
                     output = _run_investigation(
-                        agent, clarified_request, config, registry, audit_logger
+                        agent, clarified_request, config, registry, audit_logger,
+                        output_mode=output_mode,
                     )
                     output["clarification"] = {
                         "answered": True,
@@ -536,7 +584,8 @@ def main() -> int:
                         "context_provided": True,
                     }
 
-            print(json.dumps(output, ensure_ascii=False, indent=2))
+            if output_mode in {"json", "structured", "debug", "legacy"}:
+                print(json.dumps(output, ensure_ascii=False, indent=2))
             return _investigation_exit_code(
                 output["status"], output["remediation"]["status"]
             )
@@ -608,7 +657,26 @@ def main() -> int:
                     )
                     exit_code = 1
 
-            print(json.dumps(output, ensure_ascii=False, indent=2))
+            try:
+                interactive_terminal = sys.stdout.isatty()
+            except (AttributeError, OSError):
+                interactive_terminal = False
+            legacy_text = (
+                __import__("os").environ.get("LINUX_ADMIN_REPORT", "").lower()
+                == "text"
+            )
+            if args.json or args.debug or legacy_text or not interactive_terminal:
+                print(json.dumps(output, ensure_ascii=False, indent=2))
+            else:
+                executed = result.data.get("executed") is True
+                print(f"Action: restart_service {args.restart_service}")
+                print(f"Result: {result.status}")
+                print(f"System change executed: {'yes' if executed else 'no'}")
+                if output["verification"] is not None:
+                    print(
+                        "Verification: "
+                        + str(output["verification"].get("status", "unknown"))
+                    )
             return exit_code
 
         return 0
@@ -621,18 +689,6 @@ def main() -> int:
             audit_logger.close()
 
 
-
-# DUAL_TERMINAL_REPORT_PATCH
-# Keep the investigation workflow intact; only reorganize its terminal output.
-_original_run_investigation_for_report = _run_investigation
-
-
-def _run_investigation(*args, **kwargs):
-    from linux_admin.terminal_report import run_with_dual_report
-
-    return run_with_dual_report(
-        _original_run_investigation_for_report, *args, **kwargs
-    )
 
 if __name__ == "__main__":
     raise SystemExit(main())
