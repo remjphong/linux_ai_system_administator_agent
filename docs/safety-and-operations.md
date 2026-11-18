@@ -52,3 +52,40 @@ service units on an Ubuntu VM.
 - This is a local beta, not a multi-user production control plane. Before production use,
   add authenticated approvals, stricter network target policy, deployment hardening, and
   security review.
+
+## Read-only tool risk table (6 new System Intelligence tools)
+
+Six read-only diagnostic tools were added to expand system-intelligence coverage. All
+are registered with `changes_system=False`, bypass `ControlledExecutor`, and are
+declared in `config/policy.yaml` with `allowed: true` and `requires_approval: false`.
+Because they never modify system state, they do not require approval or dry-run gating;
+the policy entry exists so that the default `deny` rule does not accidentally block
+them and so that operators can audit which tools are explicitly permitted.
+
+| Tool | Action name | Risk | Rationale |
+|------|-------------|------|-----------|
+| ListAllMountsTool | `list_all_mounts` | Low | Reads mount table only (`/proc/mounts`); no writes. |
+| GetIoStatsTool | `get_io_stats` | Low | Reads disk I/O counters (`/proc/diskstats`); no writes. |
+| ListListeningPortsTool | `list_listening_ports` | Low | Reads LISTEN sockets; does not open or close ports. |
+| GetKernelLogTool | `get_kernel_log` | Low | Reads kernel ring buffer / journal; no modification. |
+| CheckAuthLogTool | `check_auth_log` | Low | Reads authentication log; no modification. |
+| list_top_processes | `list_top_processes` | Low | Reads process list sorted by CPU; does not signal processes. |
+
+**Threshold note (Question 1.1):** `config/policy.yaml` declares
+`resource_threshold_percent: 80`. The diagnostics layer (owned by the Agent
+integration track) is responsible for consuming this value; `control.py` does not
+read it because it is not a state-changing action.
+
+## Out-of-scope questions (Group C)
+
+Four questions — **3.1, 3.3, 4.2, 4.3** — were deliberately dropped from the project
+scope. They are documented here and in `docs/threat-model.md` so the decision is
+traceable. Reasons:
+
+- No read-only tool in the current registry can answer them safely.
+- Answering them would require privileged operations (write, restart, firewall
+  changes) that fall outside the read-only design and the approval workflow.
+- The project follows a fail-closed principle: it is safer to exclude a question than
+  to ship a tool whose blast radius cannot be bounded.
+
+See `docs/threat-model.md` for the threat-model view of the same decision.
