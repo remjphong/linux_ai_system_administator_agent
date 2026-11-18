@@ -642,3 +642,225 @@ def test_r02_hybrid_complex_specialization_does_not_call_llm(app_config):
     assert {step.tool_name for step in plan.steps} == {
         "get_kernel_log", "get_io_stats",
     }
+
+
+# R03 / R02-FIX-01B — Offline regression for the exact QA-08 phrasing.
+def _r03_read_only_specs() -> list[ToolSpec]:
+    from linux_admin.tools.system import DiskUsageTool
+
+    return [
+        ListAllMountsTool.spec, IoStatsTool.spec, ListListeningPortsTool.spec,
+        ListeningPortTool.spec, KernelLogTool.spec, AuthLogTool.spec,
+        TopProcessesTool.spec, SystemOverviewTool.spec, DiskUsageTool.spec,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("user_text", "expected_tool"),
+    [
+        ("Kiểm tra tất cả mount point", "list_all_mounts"),
+        ("Kiểm tra disk I/O wait", "get_io_stats"),
+        ("Liệt kê tất cả port đang LISTEN", "list_listening_ports"),
+        ("Kiểm tra kernel log lỗi", "get_kernel_log"),
+        ("Kiểm tra authentication log và brute force", "check_auth_log"),
+        ("Liệt kê top 5 tiến trình sử dụng CPU và RAM", "list_top_processes"),
+        ("Kiểm tra dung lượng ổ đĩa", "get_disk_usage"),
+    ],
+)
+def test_r03_original_seven_qa_routes(
+    app_config, user_text, expected_tool,
+) -> None:
+    specs = _r03_read_only_specs() + [StateChangingTestTool.spec]
+    by_name = {spec.name: spec for spec in specs}
+    plan = RuleBasedPlanner(app_config).create_plan(user_text, specs)
+    names = [step.tool_name for step in plan.steps]
+    assert expected_tool in names
+    assert "restart_service" not in names
+    assert len(plan.steps) <= app_config.agent.max_steps
+    for step in plan.steps:
+        spec = by_name[step.tool_name]
+        assert not spec.changes_system
+        assert ToolRegistry._validate_arguments(spec, dict(step.arguments)) is None
+
+
+@pytest.mark.parametrize(
+    "user_text",
+    [
+        "Liệt kê tất cả port đang LISTEN",
+        "Liệt kê các port LISTEN",
+        "Show ports in LISTEN state",
+        "Liệt kê các cổng đang lắng nghe",
+    ],
+)
+def test_r03_four_listen_variants_route_to_listeners(
+    app_config, user_text,
+) -> None:
+    specs = _r03_read_only_specs() + [StateChangingTestTool.spec]
+    plan = RuleBasedPlanner(app_config).create_plan(user_text, specs)
+    assert [step.tool_name for step in plan.steps] == ["list_listening_ports"]
+    assert plan.steps[0].arguments == {}
+    assert ToolRegistry._validate_arguments(
+        ListListeningPortsTool.spec, dict(plan.steps[0].arguments)
+    ) is None
+
+
+def test_r03_listen_evidence_and_read_only_safety(
+    app_config, audit_logger,
+) -> None:
+    class FakeListeners:
+        spec = ListListeningPortsTool.spec
+
+        def execute(self, **kwargs):
+            assert kwargs == {}
+            return ToolResult(
+                tool_name="list_listening_ports",
+                status="success",
+                data={
+                    "count": 2,
+                    "sockets": [
+                        {"protocol": "tcp", "local_address": "127.0.0.1",
+                         "local_port": 5432, "pid": 123},
+                        {"protocol": "tcp", "local_address": "0.0.0.0",
+                         "local_port": 8080, "pid": 234},
+                    ],
+                },
+            )
+
+    registry = ToolRegistry()
+    registry.register(FakeListeners())
+    mutating_trap = StateChangingTestTool()
+    registry.register(mutating_trap)
+    incident = Agent(
+        registry=registry, config=app_config, audit=audit_logger
+    ).run("Liệt kê tất cả port đang LISTEN")
+
+    assert incident.status == "completed"
+    assert [item.tool_name for item in incident.evidence] == [
+        "list_listening_ports"
+    ]
+    assert incident.evidence[0].data["count"] == 2
+    assert any(
+        "Confirmed fact: Local inspection returned 2 TCP listening socket(s)."
+        in finding
+        for finding in incident.findings
+    )
+    assert any(
+        "Unconfirmed hypothesis:" in finding for finding in incident.findings
+    )
+    assert not mutating_trap.called
+
+
+def test_r03_cpu_ram_and_explicit_port_routes_preserved(app_config) -> None:
+    specs = _r03_read_only_specs() + [StateChangingTestTool.spec]
+    planner = RuleBasedPlanner(app_config)
+    cpu_ram = planner.create_plan(
+        "Liệt kê top 5 tiến trình sử dụng CPU và RAM", specs
+    )
+    both = [
+        step for step in cpu_ram.steps if step.tool_name == "list_top_processes"
+    ]
+    assert len(both) == 1
+    assert both[0].arguments["sort_by"] == "both"
+    assert 1 <= both[0].arguments["limit"] <= 50
+    assert ToolRegistry._validate_arguments(
+        TopProcessesTool.spec, dict(both[0].arguments)
+    ) is None
+
+    port = planner.create_plan("Investigate port 5432", specs)
+    assert [step.tool_name for step in port.steps] == [
+        "inspect_listening_port", "list_listening_ports"
+    ]
+    assert port.steps[0].arguments == {"port": 5432}
+
+
+def test_r03_cpu_ram_both_output_evidence_preserved() -> None:
+    from linux_admin.diagnostics import synthesize_specialized_evidence
+
+    evidence = [ToolResult(
+        tool_name="list_top_processes", status="success",
+        data={
+            "sort_by": "both", "limit": 5,
+            "top_cpu": [{"pid": 101, "cpu_percent": 75.0}],
+            "top_memory": [{"pid": 202, "memory_percent": 60.0}],
+        },
+    )]
+    findings = synthesize_specialized_evidence("CPU RAM top 5", evidence)
+    assert any(
+        "Confirmed fact: The CPU process ranking contains 1" in line
+        for line in findings
+    )
+    assert any(
+        "Confirmed fact: The RAM process ranking contains 1" in line
+        for line in findings
+    )
+    assert any(
+        "Unconfirmed hypothesis:" in line for line in findings
+    )
+
+
+def test_r03_explicit_endpoint_route_unchanged(app_config) -> None:
+    from linux_admin.tools.network import HttpEndpointTool, TcpConnectivityTool
+
+    plan = RuleBasedPlanner(app_config).create_plan(
+        "Check whether http://127.0.0.1:5432/ is reachable",
+        [HttpEndpointTool.spec, TcpConnectivityTool.spec,
+         ListListeningPortsTool.spec, StateChangingTestTool.spec],
+    )
+    assert [step.tool_name for step in plan.steps] == [
+        "check_tcp_connectivity", "check_http_endpoint"
+    ]
+    assert plan.steps[0].arguments == {"host": "127.0.0.1", "port": 5432}
+    assert plan.steps[1].arguments == {"url": "http://127.0.0.1:5432/"}
+
+
+def test_r03_registry_denies_unapproved_restart() -> None:
+    registry = ToolRegistry()
+    mutating_trap = StateChangingTestTool()
+    registry.register(mutating_trap)
+    outcome = registry.invoke(
+        "restart_service", {"service_name": "qa-not-allowlisted.service"}
+    )
+    assert outcome.status == "denied"
+    assert not mutating_trap.called
+
+
+# R03 / R02-FIX-01C — explicit top-5 only; preserve other R02 defaults.
+@pytest.mark.parametrize(
+    ("user_text", "expected_args"),
+    [
+        (
+            "Liệt kê top 5 tiến trình sử dụng CPU và RAM",
+            {"limit": 5, "sort_by": "both"},
+        ),
+        (
+            "CPU RAM bottleneck",
+            {"limit": 10, "sort_by": "both"},
+        ),
+        (
+            "CPU usage high",
+            {"limit": 10, "sort_by": "cpu"},
+        ),
+        (
+            "RAM usage high",
+            {"limit": 10, "sort_by": "memory"},
+        ),
+        (
+            "List top 50 CPU RAM processes",
+            {"limit": 10, "sort_by": "both"},
+        ),
+    ],
+)
+def test_r03_01c_explicit_top5_only_keeps_other_process_defaults(
+    app_config, user_text, expected_args,
+) -> None:
+    specs = _r03_read_only_specs() + [StateChangingTestTool.spec]
+    plan = RuleBasedPlanner(app_config).create_plan(user_text, specs)
+    process_steps = [
+        step for step in plan.steps if step.tool_name == "list_top_processes"
+    ]
+    assert len(process_steps) == 1
+    assert dict(process_steps[0].arguments) == expected_args
+    assert ToolRegistry._validate_arguments(
+        TopProcessesTool.spec, dict(process_steps[0].arguments)
+    ) is None
+    assert all(step.tool_name != "restart_service" for step in plan.steps)

@@ -169,7 +169,8 @@ class RuleBasedPlanner:
             request,
             ("listening port", "listening ports", "listening socket",
              "listening sockets", "open ports", "port listeners",
-             "ports listening", "list ports", "cong dang lang nghe", "cong dang mo"),
+             "ports listening", "list ports", "cong dang lang nghe", "cong dang mo",
+             "port dang listen", "port listen", "ports in listen state"),
         )
         kernel_issue = self._contains_any(
             request,
@@ -287,9 +288,16 @@ class RuleBasedPlanner:
                 else "memory" if memory_requested and not cpu_requested
                 else "both"
             )
+            limit = (
+                5
+                if cpu_requested
+                and memory_requested
+                and self._contains_any(request, ("top 5",))
+                else 10
+            )
             add(
                 "list_top_processes",
-                {"limit": 10, "sort_by": sort_by},
+                {"limit": limit, "sort_by": sort_by},
                 "Inspect bounded CPU and/or RAM process rankings",
             )
 
