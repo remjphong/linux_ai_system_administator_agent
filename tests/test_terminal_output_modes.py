@@ -161,3 +161,33 @@ def test_investigation_tty_default_and_json_route_to_distinct_output(monkeypatch
     assert "Concise incident report" in outputs[0]
     assert '"incident_id"' not in outputs[0]
     assert json.loads(outputs[1])["incident_id"] == "incident-output-test"
+
+
+def test_cli_preserves_legacy_environment_and_explicit_json_precedence(monkeypatch):
+    monkeypatch.setenv("LINUX_ADMIN_REPORT", "text")
+    config = load_config()
+    config = replace(config, audit=replace(config.audit, enabled=False))
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(cli, "register_builtin_tools", lambda *_: ToolRegistry())
+    modes = []
+
+    def fake_investigation(*_args, output_mode):
+        modes.append(output_mode)
+        return {
+            **PAYLOAD,
+            "status": "completed",
+            "remediation": {"status": "not_proposed"},
+        }
+
+    monkeypatch.setattr(cli, "_run_investigation", fake_investigation)
+    for argv in (
+        ["linux-admin", "--investigate", "status"],
+        ["linux-admin", "--json", "--investigate", "status"],
+    ):
+        stream = _Pipe()
+        monkeypatch.setattr(cli.sys, "stdout", stream)
+        monkeypatch.setattr(cli.sys, "argv", argv)
+        assert cli.main() == 0
+        assert json.loads(stream.getvalue())["incident_id"] == "incident-output-test"
+
+    assert modes == ["legacy", "json"]

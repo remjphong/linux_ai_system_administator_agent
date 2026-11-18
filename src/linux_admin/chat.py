@@ -13,16 +13,22 @@ from typing import Any
 from linux_admin.terminal_report import _render_user_report
 
 _GREETING = re.compile(
-    r"^(?:hi|hello|hey|xin chào|chào(?: bạn)?|chao(?: ban)?|good morning|good evening)[!. ]*$",
+    r"^(?:hi|hello|hey|xin chào|chào(?: bạn)?|chào buổi sáng|"
+    r"chao(?: ban)?|chao buoi sang|good morning|good evening)[!. ]*$",
     re.IGNORECASE,
 )
 _FOLLOW_UP = re.compile(
-    r"\b(?:it|that|this|those|they|its|their|them|ở đó|cái đó|nó|chúng|vậy còn)\b",
+    r"\b(?:it|that|this|those|they|its|their|them|ở đó|cái đó|đó|nó|chúng|vậy còn)\b",
     re.IGNORECASE,
 )
 _PORT = re.compile(r"\b(?:port|cổng)\s*[:#-]?\s*(\d{1,5})\b", re.IGNORECASE)
 _SERVICE = re.compile(r"\b[a-zA-Z0-9_.@-]+\.service\b")
 _URL = re.compile(r"https?://[^\s,;]+", re.IGNORECASE)
+_CACHED_EXPLANATION = re.compile(
+    r"(?:giải thích|giai thich).*(?:kết quả|ket qua)|"
+    r"(?:explain|clarify).*(?:result|that|it)",
+    re.IGNORECASE,
+)
 _HISTORY_LIMIT = 8
 _CONTEXT_LIMIT = 3
 
@@ -34,6 +40,7 @@ class Turn:
     findings: list[str]
     evidence: list[str]
     details: str
+    targets: list[str]
 
 
 def _targets(request: str) -> list[str]:
@@ -105,16 +112,34 @@ class ChatSession:
         if _GREETING.fullmatch(value):
             return "Xin chào. Tôi có thể giúp kiểm tra CPU, RAM, dịch vụ, cổng hoặc URL."
 
+        if _CACHED_EXPLANATION.search(value):
+            if not self.turns:
+                return "Chưa có kết quả điều tra trong phiên để giải thích."
+            return self._explain_cached(self.turns[-1])
+
         targets = _targets(value)
         if _FOLLOW_UP.search(value) and not targets:
             if not self.turns:
-                return "Bạn đang nhắc đến sự cố hoặc mục tiêu nào?"
-            prior_targets = _targets(self.turns[-1].request)
-            if len(prior_targets) != 1:
-                return "Có nhiều mục tiêu trong ngữ cảnh trước. Bạn muốn nói đến mục tiêu nào?"
+                return (
+                    "Chưa có mục tiêu trước đó. Vui lòng nêu cổng, dịch vụ "
+                    "hoặc URL bạn muốn hỏi."
+                )
+            prior_targets = self.turns[-1].targets
+            if not prior_targets:
+                return (
+                    "Không tìm thấy mục tiêu cụ thể trong kết quả trước. "
+                    "Vui lòng nêu cổng, dịch vụ hoặc URL."
+                )
+            if len(prior_targets) > 1:
+                choices = ", ".join(prior_targets)
+                return (
+                    f"Có nhiều mục tiêu trong ngữ cảnh trước ({choices}). "
+                    "Bạn muốn nói đến mục tiêu nào?"
+                )
+            targets = prior_targets.copy()
             value = (
                 f"{value}\n\nNgữ cảnh phiên: mục tiêu được nêu rõ trước đó là "
-                f"{prior_targets[0]}. Không suy diễn dịch vụ từ cổng."
+                f"{targets[0]}. Không suy diễn dịch vụ từ cổng."
             )
 
         context = list(self.turns)[-_CONTEXT_LIMIT:]
@@ -129,7 +154,14 @@ class ChatSession:
 
         try:
             result = self.runner(
-                [self.cli, "--config-dir", self.config_dir, "--investigate", value],
+                [
+                    self.cli,
+                    "--config-dir",
+                    self.config_dir,
+                    "--json",
+                    "--investigate",
+                    value,
+                ],
                 text=True,
                 capture_output=True,
                 check=False,
@@ -151,9 +183,21 @@ class ChatSession:
                 findings=findings,
                 evidence=evidence,
                 details=json.dumps(payload, ensure_ascii=False, indent=2),
+                targets=targets,
             )
         )
         return _render_user_report(payload, result.returncode)
+
+    @staticmethod
+    def _explain_cached(turn: Turn) -> str:
+        """Explain the most recent cached result without launching the CLI."""
+        lines = [f"Kết quả điều tra {turn.incident_id or 'không có incident ID'}:"]
+        lines.extend(f"- {finding}" for finding in turn.findings)
+        lines.extend(f"- Bằng chứng: {item}" for item in turn.evidence)
+        if not turn.findings and not turn.evidence:
+            lines.append("Kết quả chưa có finding hoặc evidence tóm tắt.")
+        lines.append("Đây là dữ liệu đã lưu từ lượt trước; không chạy kiểm tra mới.")
+        return "\n".join(lines)
 
 
 def main() -> int:
