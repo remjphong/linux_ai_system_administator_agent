@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from linux_admin.contracts import ToolResult
-from linux_admin.diagnostics import diagnose_incident
+from linux_admin.diagnostics import (
+    diagnose_incident,
+    synthesize_specialized_evidence,
+)
 
 
 def result(name: str, data: dict, *, status: str = "success") -> ToolResult:
@@ -444,3 +447,97 @@ def test_generic_vietnamese_system_status_uses_system_survey() -> None:
     assert any("CPU utilization was 10.0%" in fact for fact in report.confirmed_facts)
     assert any("Filesystem / was 50.0% used" in fact for fact in report.confirmed_facts)
 
+def test_r02_config_threshold_is_read_at_runtime(app_config, tmp_path):
+    from linux_admin.config import ConfigurationError, load_config
+
+    assert app_config.policy.resource_threshold_percent == 80.0
+    for filename in ("agent.yaml", "policy.yaml", "services.yaml"):
+        (tmp_path / filename).write_text(
+            (app_config.config_dir / filename).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+    policy_file = tmp_path / "policy.yaml"
+    original = policy_file.read_text(encoding="utf-8")
+    import pytest
+
+    for invalid in ("0", "101", "true", '"not-a-number"'):
+        policy_file.write_text(
+            original.replace("resource_threshold_percent: 80",
+                             f"resource_threshold_percent: {invalid}"),
+            encoding="utf-8",
+        )
+        with pytest.raises(ConfigurationError, match="resource_threshold_percent"):
+            load_config(config_dir=tmp_path, project_root=app_config.project_root,
+                        dotenv_path=tmp_path / "no.env")
+
+
+def test_r02_threshold_is_effective_at_boundary() -> None:
+    for percent, expected in ((79.9, False), (80.0, True), (80.1, True)):
+        evidence = [result("get_system_overview", {
+            "cpu_percent": percent, "memory_percent": 30.0,
+            "swap_percent": 0.0,
+        })]
+        report = diagnose_incident(
+            "Check CPU", evidence, resource_threshold_percent=80.0,
+        )
+        assert (report.classification == "resource_pressure") is expected
+        assert not any("sustained" in fact for fact in report.confirmed_facts)
+        assert (
+            "snapshot" in report.summary.lower()
+            or any("sample" in item for item in report.hypotheses)
+        )
+
+
+def test_r02_policy_threshold_changes_generic_and_survey_paths() -> None:
+    evidence = [result("get_system_overview", {
+        "cpu_percent": 85.0, "memory_percent": 85.0, "swap_percent": 0.0,
+    })]
+    generic = diagnose_incident(
+        "Check CPU RAM", evidence, resource_threshold_percent=90.0,
+    )
+    survey = diagnose_incident(
+        "Kiểm tra tình trạng hệ thống", evidence,
+        resource_threshold_percent=80.0,
+    )
+    assert generic.classification == "resource_snapshot_no_pressure_signal"
+    assert "resource threshold signal(s)" in survey.summary
+    assert "80% investigation threshold" in " ".join(survey.confirmed_facts)
+
+
+def test_r02_specialized_evidence_keeps_facts_and_hypotheses_distinct():
+    evidence = [
+        result("list_all_mounts", {"mounts": [
+            {"mount_point": "/data", "used_percent": 80.0}]}),
+        result("list_listening_ports", {"sockets": [
+            {"local_port": 5432, "pid": 1234}]}),
+        result("get_io_stats", {"sample_seconds": 1.0,
+            "io_wait_percent": 20.0,
+            "disk_stats": [{"device": "sda", "util_percent": 95.0}]}),
+        result("get_kernel_log", {"messages": ["kernel: Out of memory: killed process"]}),
+        result("check_auth_log", {"failed_login_count": 12,
+            "successful_login_count": 1, "brute_force_suspected": True,
+            "suspicious_ips": [{"ip": "192.0.2.4", "failure_count": 12}]}),
+        result("list_top_processes", {"top_cpu": [{"pid": 10}],
+            "top_memory": [{"pid": 11}]}),
+    ]
+    findings = synthesize_specialized_evidence(
+        "Investigate port 5432 and CPU RAM bottleneck", evidence,
+    )
+    assert any("80.0% usage" in f for f in findings if f.startswith("Confirmed"))
+    assert any("port 5432" in f for f in findings if f.startswith("Confirmed"))
+    assert any("OOM-related text" in f for f in findings if f.startswith("Confirmed"))
+    assert any("failed login" in f for f in findings if f.startswith("Confirmed"))
+    assert any("short snapshots" in f for f in findings if f.startswith("Unconfirmed"))
+    assert not any("compromised" in f or "sustained bottleneck confirmed" in f
+                   for f in findings)
+
+
+def test_r02_failed_tools_never_generate_synthetic_success_facts():
+    findings = synthesize_specialized_evidence(
+        "Inspect auth and kernel", [
+            result("check_auth_log", {"failed_login_count": 100}, status="failed"),
+            result("get_kernel_log", {"messages": ["OOM"]}, status="failed"),
+        ],
+    )
+    assert any("returned status failed" in f for f in findings)
+    assert not any("100 failed" in f or "OOM-related" in f for f in findings)

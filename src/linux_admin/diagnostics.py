@@ -31,6 +31,7 @@ DiagnosisClass = Literal[
     "security_posture_review",
     "recent_system_errors",
     "no_recent_errors",
+    "specialized_evidence_observed",
     "inconclusive",
 ]
 Confidence = Literal["high", "medium", "low"]
@@ -66,6 +67,8 @@ class DiagnosticReport:
 def diagnose_incident(
     user_request: str,
     evidence: Sequence[ToolResult],
+    *,
+    resource_threshold_percent: float = 80.0,
 ) -> DiagnosticReport:
     """Classify common endpoint and systemd outcomes without overstating certainty."""
     by_tool: dict[str, list[ToolResult]] = {}
@@ -632,9 +635,9 @@ def diagnose_incident(
 
         if survey_system is not None:
             for label, value, threshold in (
-                ("CPU", survey_cpu, 90.0),
-                ("RAM", survey_memory, 90.0),
-                ("Swap", survey_swap, 80.0),
+                ("CPU", survey_cpu, resource_threshold_percent),
+                ("RAM", survey_memory, resource_threshold_percent),
+                ("Swap", survey_swap, resource_threshold_percent),
             ):
                 if value is None:
                     continue
@@ -679,10 +682,11 @@ def diagnose_incident(
                 survey_facts.append(
                     f"Filesystem {disk_path} was {survey_disk_used:.1f}% used."
                 )
-                if survey_disk_used >= 90:
+                if survey_disk_used >= resource_threshold_percent:
                     message = (
                         f"Filesystem {disk_path} was {survey_disk_used:.1f}% "
-                        "used, at or above the 90% investigation threshold."
+                        f"used, at or above the "
+                        f"{resource_threshold_percent:g}% investigation threshold."
                     )
                     pressure_indicators.append(message)
                     survey_facts.append(message)
@@ -1156,26 +1160,26 @@ def diagnose_incident(
             observed.append(
                 f"CPU utilization was {cpu:.1f}% in the collected snapshot."
             )
-            if cpu >= 90:
+            if cpu >= resource_threshold_percent:
                 pressure_indicators.append(
                     f"CPU utilization reached {cpu:.1f}%, at or above the "
-                    "90% high-utilization threshold."
+                    f"{resource_threshold_percent:g}% high-utilization threshold."
                 )
 
         if memory is not None:
             observed.append(f"RAM utilization was {memory:.1f}%.")
-            if memory >= 90:
+            if memory >= resource_threshold_percent:
                 pressure_indicators.append(
                     f"RAM utilization reached {memory:.1f}%, at or above the "
-                    "90% high-utilization threshold."
+                    f"{resource_threshold_percent:g}% high-utilization threshold."
                 )
 
         if swap is not None:
             observed.append(f"Swap utilization was {swap:.1f}%.")
-            if swap >= 80:
+            if swap >= resource_threshold_percent:
                 pressure_indicators.append(
                     f"Swap utilization reached {swap:.1f}%, at or above the "
-                    "80% investigation threshold."
+                    f"{resource_threshold_percent:g}% investigation threshold."
                 )
 
         if disk_used is not None:
@@ -1183,10 +1187,11 @@ def diagnose_incident(
             observed.append(
                 f"Filesystem {filesystem} was {disk_used:.1f}% used."
             )
-            if disk_used >= 90:
+            if disk_used >= resource_threshold_percent:
                 pressure_indicators.append(
                     f"Filesystem {filesystem} was {disk_used:.1f}% used, "
-                    "at or above the 90% investigation threshold."
+                    f"at or above the {resource_threshold_percent:g}% "
+                    "investigation threshold."
                 )
 
         if observed and pressure_indicators:
@@ -1231,6 +1236,33 @@ def diagnose_incident(
                 ),
             )
 
+    # R02: successful specialized observations are informative even when they do
+    # not by themselves identify the underlying incident root cause.
+    if any(
+        result.ok and result.tool_name in {
+            "list_all_mounts", "get_io_stats", "list_listening_ports",
+            "get_kernel_log", "check_auth_log", "list_top_processes",
+            "inspect_listening_port",
+        }
+        for result in evidence
+    ):
+        return DiagnosticReport(
+            classification="specialized_evidence_observed",
+            confidence="medium",
+            summary=(
+                "Read-only specialized observations were collected; "
+                "a root cause has not been established."
+            ),
+            hypotheses=(
+                ("Single-time observations do not establish an ongoing "
+                 "bottleneck, compromise, or service ownership."),
+            ),
+            next_checks=(
+                ("Correlate the recorded evidence with the incident time "
+                 "and repeat the relevant bounded checks."),
+            ),
+        )
+
     # General evidence failures should never be rendered as a confident root cause.
     tool_failures = [result for result in evidence if not result.ok]
     if tool_failures:
@@ -1269,3 +1301,148 @@ def _last_success_data(results: Sequence[ToolResult]) -> dict | None:
         if result.ok and isinstance(result.data, dict):
             return result.data
     return None
+
+def synthesize_specialized_evidence(
+    user_request: str,
+    evidence: Sequence[ToolResult],
+    *,
+    resource_threshold_percent: float = 80.0,
+) -> list[str]:
+    """Append bounded facts from R02 tools without implying duration or cause.
+
+    This is an additive read-only interpretation layer. A missing/failed tool
+    never becomes a confirmed observation, and counts are tied to sampled data.
+    """
+    import re
+    import unicodedata
+
+    normalized = user_request.casefold().replace("đ", "d")
+    request = "".join(
+        char for char in unicodedata.normalize("NFKD", normalized)
+        if not unicodedata.combining(char)
+    )
+    match = re.search(r"\b(?:port|cong)\s*[:#-]?\s*(\d{1,5})\b", request)
+    requested_port = int(match.group(1)) if match else None
+    if requested_port is not None and not 1 <= requested_port <= 65535:
+        requested_port = None
+    findings: list[str] = []
+    specialized = (
+        "list_all_mounts", "get_io_stats", "list_listening_ports",
+        "get_kernel_log", "check_auth_log", "list_top_processes",
+        "inspect_listening_port",
+    )
+
+    def fact(message: str) -> None:
+        findings.append(f"Confirmed fact: {message}")
+
+    def hypothesis(message: str) -> None:
+        findings.append(f"Unconfirmed hypothesis: {message}")
+
+    def next_check(message: str) -> None:
+        findings.append(f"Recommended next check: {message}")
+
+    for tool_name in specialized:
+        results = [item for item in evidence if item.tool_name == tool_name]
+        for result in results:
+            if not result.ok:
+                fact(f"{tool_name} returned status {result.status}; its measurements are unavailable.")
+        data = _last_success_data(results)
+        if data is None:
+            continue
+
+        if tool_name == "list_all_mounts":
+            mounts = data.get("mounts")
+            if isinstance(mounts, list):
+                fact(f"The mount inspection returned {len(mounts)} mount records.")
+                for entry in mounts[:20]:
+                    if not isinstance(entry, dict):
+                        continue
+                    used = _valid_percentage(entry, "used_percent")
+                    if used is not None and used >= resource_threshold_percent:
+                        mount = str(entry.get("mount_point", "unknown"))[:120]
+                        fact(
+                            f"Mount {mount} reported {used:.1f}% usage, at or "
+                            f"above the configured {resource_threshold_percent:g}% threshold."
+                        )
+                        hypothesis("Mount usage is a point-in-time signal, not proof of an ongoing shortage.")
+                next_check("Correlate mount usage with its filesystem type and repeated measurements.")
+        elif tool_name == "get_io_stats":
+            sample = data.get("sample_seconds")
+            if isinstance(sample, (int, float)) and not isinstance(sample, bool) and sample > 0:
+                fact(f"Disk I/O counters were sampled over {sample:g} second(s).")
+            iowait = _valid_percentage(data, "io_wait_percent")
+            if iowait is not None:
+                fact(f"CPU iowait was {iowait:.1f}% during the I/O sample.")
+            disks = data.get("disk_stats")
+            if isinstance(disks, list):
+                fact(f"The I/O sample returned {len(disks)} device record(s).")
+                for entry in disks[:3]:
+                    if not isinstance(entry, dict):
+                        continue
+                    util = _valid_percentage(entry, "util_percent")
+                    if util is not None and util >= resource_threshold_percent:
+                        device = str(entry.get("device", "unknown"))[:80]
+                        fact(f"Device {device} reported {util:.1f}% busy in this sample.")
+            hypothesis("A short I/O sample does not establish sustained contention or its cause.")
+            next_check("Repeat I/O samples during the symptom and correlate with application latency.")
+        elif tool_name == "list_listening_ports":
+            sockets = data.get("sockets")
+            if isinstance(sockets, list):
+                fact(f"Local inspection returned {len(sockets)} TCP listening socket(s).")
+                if requested_port is not None:
+                    matching = [
+                        entry for entry in sockets if isinstance(entry, dict)
+                        and entry.get("local_port") == requested_port
+                    ]
+                    fact(
+                        f"The local listener snapshot contains {len(matching)} "
+                        f"TCP socket(s) bound to port {requested_port}."
+                    )
+                    if matching:
+                        pids = {entry.get("pid") for entry in matching if type(entry.get("pid")) is int}
+                        if pids:
+                            fact(f"Visible owning PIDs for port {requested_port}: " +
+                                 ", ".join(str(pid) for pid in sorted(pids)[:10]) + ".")
+                    hypothesis("A local TCP listener does not establish endpoint reachability or intended service ownership.")
+        elif tool_name == "inspect_listening_port":
+            port = data.get("port")
+            listeners = data.get("listeners")
+            if type(port) is int and isinstance(listeners, list) and data.get("supported") is True:
+                fact(f"Port {port} inspection returned {len(listeners)} listener record(s).")
+                hypothesis("A local socket snapshot alone does not establish whether the intended database or service is healthy.")
+        elif tool_name == "get_kernel_log":
+            messages = data.get("messages")
+            if isinstance(messages, list):
+                lines = [item for item in messages if isinstance(item, str) and item.strip() != "-- No entries --"]
+                fact(f"Kernel query returned {len(lines)} non-empty log entry/entries.")
+                oom = sum(bool(re.search(r"\boom\b|out of memory|killed process", line, re.IGNORECASE)) for line in lines)
+                if oom:
+                    fact(f"{oom} sampled kernel log entry/entries contain OOM-related text.")
+                    hypothesis("A historical OOM log entry does not prove current memory exhaustion or ongoing OOM kills.")
+                next_check("Correlate kernel entry timestamps with resource readings and the incident time.")
+        elif tool_name == "check_auth_log":
+            failed = data.get("failed_login_count")
+            success = data.get("successful_login_count")
+            if type(failed) is int and failed >= 0:
+                fact(f"Authentication log sample counted {failed} failed login event(s).")
+            if type(success) is int and success >= 0:
+                fact(f"Authentication log sample counted {success} successful login event(s).")
+            suspicious = data.get("suspicious_ips")
+            if data.get("brute_force_suspected") is True and isinstance(suspicious, list) and suspicious:
+                fact(f"The authentication tool flagged {len(suspicious)} source IP(s) against its configured failure-count threshold.")
+                hypothesis("Repeated failures suggest possible brute-force attempts but do not prove a compromise.")
+                next_check("Correlate source IP failure counts and timestamps with authorized access records.")
+        elif tool_name == "list_top_processes":
+            for key, label in (("top_cpu", "CPU"), ("top_memory", "RAM"),
+                               ("processes", "process")):
+                processes = data.get(key)
+                if not isinstance(processes, list):
+                    continue
+                fact(f"The {label} process ranking contains {len(processes)} sampled process(es).")
+                if processes and isinstance(processes[0], dict):
+                    top = processes[0]
+                    pid = top.get("pid")
+                    if type(pid) is int and pid > 0:
+                        fact(f"The first {label} process entry has PID {pid}; this is not proof of causality.")
+            hypothesis("Process rankings are short snapshots and cannot establish sustained CPU/RAM bottlenecks.")
+    return findings

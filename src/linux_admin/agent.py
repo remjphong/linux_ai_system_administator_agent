@@ -16,7 +16,10 @@ from urllib.parse import urlsplit
 
 from linux_admin.config import AppConfig
 from linux_admin.contracts import IncidentContext, ToolResult, ToolSpec
-from linux_admin.diagnostics import diagnose_incident
+from linux_admin.diagnostics import (
+    diagnose_incident,
+    synthesize_specialized_evidence,
+)
 from linux_admin.llm_client import (
     AgentPlan,
     LLMClient,
@@ -62,9 +65,12 @@ class RuleBasedPlanner:
         available_tools: Sequence[ToolSpec],
     ) -> AgentPlan:
         request = self._normalize_request(user_request)
-        available = {
-            spec.name for spec in available_tools if not spec.changes_system
+        read_only_specs = {
+            spec.name: spec
+            for spec in available_tools
+            if not spec.changes_system
         }
+        available = set(read_only_specs)
         service_name = self._explicit_service_name_from_request(user_request)
         url = self._url_from_request(user_request)
 
@@ -73,6 +79,17 @@ class RuleBasedPlanner:
 
         def add(name: str, arguments: dict, reason: str) -> None:
             if name in available and name not in selected:
+                # Older integrations may expose only the legacy limit field.
+                # Never pass unregistered options to ToolRegistry.
+                if name == "list_top_processes" and "sort_by" in arguments:
+                    properties = read_only_specs[name].parameters.get(
+                        "properties", {}
+                    )
+                    if "sort_by" not in properties:
+                        arguments = {
+                            key: value for key, value in arguments.items()
+                            if key != "sort_by"
+                        }
                 candidates.append(PlanStep(name, arguments, reason))
                 selected.add(name)
 
@@ -134,6 +151,62 @@ class RuleBasedPlanner:
             ),
         )
         endpoint_issue = bool(url) or self._looks_like_unreachable(request)
+
+        # R02: inspect only explicitly requested host resources and log domains.
+        # Registered read-only tools only; never invent a service from a port.
+        mount_issue = self._contains_any(
+            request,
+            ("mount", "mounts", "mount point", "mounted filesystem",
+             "mounted filesystems", "phan vung", "diem gan ket"),
+        )
+        io_issue = self._contains_any(
+            request,
+            ("i/o", "disk io", "io stats", "iowait", "io wait",
+             "disk throughput", "disk latency", "read write speed",
+             "toc do doc ghi"),
+        )
+        listener_issue = self._contains_any(
+            request,
+            ("listening port", "listening ports", "listening socket",
+             "listening sockets", "open ports", "port listeners",
+             "ports listening", "list ports", "cong dang lang nghe", "cong dang mo"),
+        )
+        kernel_issue = self._contains_any(
+            request,
+            ("kernel", "dmesg", "oom", "out of memory",
+             "killed process", "kernel panic", "loi nhan"),
+        )
+        auth_issue = self._contains_any(
+            request,
+            ("ssh", "sshd", "failed login", "failed logins", "login",
+             "logins", "brute force", "failed password", "authentication",
+             "dang nhap", "xac thuc"),
+        )
+        match = re.search(r"\b(?:port|cong)\s*[:#-]?\s*(\d{1,5})\b", request)
+        explicit_port = int(match.group(1)) if match else None
+        if explicit_port is not None and not 1 <= explicit_port <= 65535:
+            explicit_port = None
+        if mount_issue:
+            add("list_all_mounts", {}, "Enumerate mounted filesystems read-only")
+        if io_issue:
+            add("get_io_stats", {"sample_seconds": 1.0},
+                "Measure bounded disk I/O and CPU iowait")
+        if explicit_port is not None:
+            add("inspect_listening_port", {"port": explicit_port},
+                "Inspect only the explicitly named local port")
+            listener_issue = True
+        if listener_issue:
+            add("list_listening_ports", {}, "Enumerate local TCP listeners")
+        if kernel_issue:
+            add("get_kernel_log", {"lines": 50, "since_minutes": 60,
+                                   "priority": "err"},
+                "Inspect bounded kernel error and OOM evidence")
+        if auth_issue:
+            add("check_auth_log", {"lines": 100, "since_minutes": 60,
+                                   "brute_force_threshold": 10},
+                "Inspect bounded authentication-anomaly counts")
+        specialized_issue = any((mount_issue, io_issue, listener_issue,
+                                 kernel_issue, auth_issue))
 
         # Probe the user-supplied endpoint only; never invent localhost targets.
         if url:
@@ -203,10 +276,21 @@ class RuleBasedPlanner:
                 {},
                 "Collect CPU, memory, uptime, and process-count metrics",
             )
+            cpu_requested = self._contains_any(
+                request, ("cpu", "processor", "cpu cao")
+            )
+            memory_requested = self._contains_any(
+                request, ("memory", "ram", "swap", "bo nho", "ram cao")
+            )
+            sort_by = (
+                "cpu" if cpu_requested and not memory_requested
+                else "memory" if memory_requested and not cpu_requested
+                else "both"
+            )
             add(
                 "list_top_processes",
-                {"limit": 10},
-                "Identify processes with the largest memory footprint",
+                {"limit": 10, "sort_by": sort_by},
+                "Inspect bounded CPU and/or RAM process rankings",
             )
 
         if security_issue:
@@ -293,7 +377,7 @@ class RuleBasedPlanner:
         elif not any(
             (
                 disk_issue, resource_issue, security_issue, network_issue,
-                service_issue, log_issue, endpoint_issue,
+                service_issue, log_issue, endpoint_issue, specialized_issue,
             )
         ):
             rationale = (
@@ -301,6 +385,8 @@ class RuleBasedPlanner:
             )
         else:
             categories = []
+            if specialized_issue:
+                categories.append("specialized local evidence")
             if endpoint_issue:
                 categories.append("endpoint connectivity")
             if service_issue:
@@ -440,6 +526,9 @@ class HybridPlanner:
         "o dia", "dung luong dia", "o cung day",
         "network", "internet", "wifi", "dns", "gateway",
         "mang", "security", "permission", "privilege",
+        "mount", "mounts", "phan vung", "i/o", "iowait",
+        "kernel", "dmesg", "oom", "ssh", "login",
+        "listener", "listening", "socket", "cong",
         "authentication", "unauthorized", "firewall",
         "bao mat", "quyen truy cap", "xac thuc",
     )
@@ -664,6 +753,17 @@ class HybridPlanner:
                     steps=tuple(steps),
                     rationale=rationale,
                 )
+
+        # R02 local specializations are deterministic, even when the user
+        # asks to correlate several observations. Keep web research separate.
+        specialized_local = RuleBasedPlanner._contains_any(
+            normalized,
+            ("mount", "mounts", "i/o", "iowait", "kernel",
+             "dmesg", "oom", "ssh", "brute force",
+             "listening", "listener", "port 5432"),
+        )
+        if specialized_local and not research_requested and len(urls) <= 1:
+            complex_request = False
 
         # Let the LLM handle ambiguous or explicitly comparative/multi-system tasks.
         if complex_request or (
@@ -1078,8 +1178,19 @@ class Agent:
             diagnostic_report = diagnose_incident(
                 context.user_request,
                 context.evidence,
+                resource_threshold_percent=(
+                    self.config.policy.resource_threshold_percent
+                ),
             )
             context.findings.extend(diagnostic_report.to_findings())
+            context.findings.extend(
+                synthesize_specialized_evidence(
+                    context.user_request, context.evidence,
+                    resource_threshold_percent=(
+                        self.config.policy.resource_threshold_percent
+                    ),
+                )
+            )
 
         # When the real LLM planned the investigation, send bounded tool evidence
         # back for synthesis. A summary failure must be visible and must not erase

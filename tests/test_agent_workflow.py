@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
+import pytest
+
 from linux_admin.agent import Agent, RuleBasedPlanner
 from linux_admin.contracts import ToolResult, ToolSpec
 from linux_admin.llm_client import AgentPlan, FakeLLMClient, PlanStep
 from linux_admin.registry import ToolRegistry
+from linux_admin.tools.logs import AuthLogTool, KernelLogTool
+from linux_admin.tools.network import (
+    ListeningPortTool,
+    ListListeningPortsTool,
+)
+from linux_admin.tools.system import (
+    IoStatsTool,
+    ListAllMountsTool,
+    SystemOverviewTool,
+    TopProcessesTool,
+)
 
 
 class StateChangingTestTool:
@@ -511,3 +524,121 @@ def test_agent_adaptively_inspects_reported_failed_service(
         "Adaptive follow-up selected: get_service_status" in finding
         for finding in incident.findings
     )
+
+@pytest.mark.parametrize(
+    ("user_text", "expected", "arguments"),
+    [
+        ("List all mounts", "list_all_mounts", {}),
+        ("Inspect disk I/O and iowait", "get_io_stats", {"sample_seconds": 1.0}),
+        ("List listening ports", "list_listening_ports", {}),
+        ("Inspect kernel OOM errors", "get_kernel_log",
+         {"lines": 50, "since_minutes": 60, "priority": "err"}),
+        ("Investigate SSH failed login anomalies", "check_auth_log",
+         {"lines": 100, "since_minutes": 60, "brute_force_threshold": 10}),
+        ("Investigate port 5432", "inspect_listening_port", {"port": 5432}),
+        ("Kiểm tra cổng 5432", "inspect_listening_port", {"port": 5432}),
+        ("CPU usage high", "list_top_processes", {"limit": 10, "sort_by": "cpu"}),
+        ("RAM usage high", "list_top_processes", {"limit": 10, "sort_by": "memory"}),
+        ("CPU RAM bottleneck", "list_top_processes",
+         {"limit": 10, "sort_by": "both"}),
+    ],
+)
+def test_r02_routes_read_only_specializations(app_config, user_text, expected, arguments):
+    specs = [
+        tool.spec for tool in (
+            ListAllMountsTool, IoStatsTool, ListListeningPortsTool,
+            ListeningPortTool, KernelLogTool, AuthLogTool,
+            TopProcessesTool, SystemOverviewTool,
+        )
+    ]
+    specs.append(ToolSpec(
+        name="restart_service", description="must not be selected",
+        risk_level="high", changes_system=True, requires_approval=True,
+    ))
+    plan = RuleBasedPlanner(app_config).create_plan(user_text, specs)
+    steps = [step for step in plan.steps if step.tool_name == expected]
+    assert len(steps) == 1
+    assert steps[0].arguments == arguments
+    assert "restart_service" not in [step.tool_name for step in plan.steps]
+    assert len(plan.steps) <= app_config.agent.max_steps
+
+
+def test_r02_legacy_process_schema_never_receives_sort_by(app_config):
+    legacy = ToolSpec(
+        name="list_top_processes", description="legacy process list",
+        parameters={"type": "object", "properties": {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        }, "required": ["limit"], "additionalProperties": False},
+    )
+    plan = RuleBasedPlanner(app_config).create_plan("CPU usage high", [legacy])
+    assert plan.steps[0].arguments == {"limit": 10}
+
+
+def test_r02_unregistered_specializations_are_not_invented(app_config):
+    plan = RuleBasedPlanner(app_config).create_plan("Inspect kernel OOM", [])
+    assert plan.steps == ()
+
+
+def test_r02_port_5432_does_not_guess_postgresql_service(app_config):
+    tools = [
+        ListeningPortTool.spec, ListListeningPortsTool.spec,
+        ToolSpec(name="get_service_status", description="status"),
+        ToolSpec(name="get_service_logs", description="logs"),
+        ToolSpec(name="check_tcp_connectivity", description="tcp"),
+    ]
+    plan = RuleBasedPlanner(app_config).create_plan(
+        "Why is port 5432 not listening?", tools,
+    )
+    assert {step.tool_name for step in plan.steps} == {
+        "inspect_listening_port", "list_listening_ports",
+    }
+    assert plan.steps[0].arguments == {"port": 5432}
+
+
+def test_r02_port_out_of_range_never_probes_arbitrary_endpoint(app_config):
+    plan = RuleBasedPlanner(app_config).create_plan(
+        "Investigate port 99999", [ListeningPortTool.spec],
+    )
+    assert plan.steps == ()
+
+
+def test_r02_agent_never_executes_mutating_tool_for_mount_investigation(
+    app_config, audit_logger,
+):
+    class FakeMountTool:
+        spec = ListAllMountsTool.spec
+
+        def execute(self, **kwargs):
+            assert kwargs == {}
+            return ToolResult(
+                tool_name="list_all_mounts", status="success",
+                data={"mounts": [{"mount_point": "/data", "used_percent": 85.0}]},
+            )
+
+    mutator = StateChangingTestTool()
+    registry = ToolRegistry()
+    registry.register(FakeMountTool())
+    registry.register(mutator)
+    incident = Agent(registry, app_config, audit_logger).run("List all mounts")
+    assert incident.status == "completed"
+    assert not mutator.called
+    assert any("Mount /data reported 85.0%" in line for line in incident.findings)
+
+
+def test_r02_hybrid_complex_specialization_does_not_call_llm(app_config):
+    from linux_admin.agent import HybridPlanner
+
+    class UnexpectedLLM:
+        def create_plan(self, user_request, available_tools):
+            raise AssertionError("Specialized local investigation must be deterministic")
+
+    planner = HybridPlanner(
+        app_config, RuleBasedPlanner(app_config), UnexpectedLLM(),
+    )
+    plan = planner.create_plan(
+        "Compare kernel OOM with disk I/O",
+        [KernelLogTool.spec, IoStatsTool.spec],
+    )
+    assert {step.tool_name for step in plan.steps} == {
+        "get_kernel_log", "get_io_stats",
+    }
