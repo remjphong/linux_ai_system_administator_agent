@@ -115,7 +115,19 @@ class ChatSession:
         if _CACHED_EXPLANATION.search(value):
             if not self.turns:
                 return "Chưa có kết quả điều tra trong phiên để giải thích."
-            return self._explain_cached(self.turns[-1])
+            turn = self.turns[-1]
+            requested_targets = _targets(value)
+            if requested_targets and any(
+                target not in turn.targets for target in requested_targets
+            ):
+                recorded_targets = ", ".join(turn.targets) or "không có mục tiêu rõ ràng"
+                requested = ", ".join(requested_targets)
+                return (
+                    f"Kết quả gần nhất thuộc {recorded_targets}; phiên này chưa có "
+                    f"bằng chứng đã lưu cho {requested}. Hãy kiểm tra mục tiêu đó "
+                    "trước rồi yêu cầu giải thích lại."
+                )
+            return self._explain_cached(turn)
 
         targets = _targets(value)
         if _FOLLOW_UP.search(value) and not targets:
@@ -174,6 +186,11 @@ class ChatSession:
         except (json.JSONDecodeError, TypeError):
             error = result.stderr.strip() or output or "CLI không trả về kết quả."
             return error
+        if not isinstance(payload, dict):
+            return (
+                "Kết quả CLI không phải đối tượng JSON; "
+                "lượt điều tra chưa được lưu."
+            )
 
         findings, evidence = _result_context(payload)
         self.turns.append(

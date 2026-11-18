@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from linux_admin.chat import ChatSession
 
 
@@ -102,6 +104,81 @@ def test_vietnamese_port_follow_up_and_cached_explanation_use_four_turn_contract
     assert "incident-3" in explanation
     assert "Diagnosis: sample" in explanation
     assert "Observed local port evidence" in explanation
+
+
+def test_explicit_matching_cached_target_is_explained_without_new_child():
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(
+            stdout=json.dumps(_payload("incident-5432")),
+            stderr="",
+            returncode=0,
+        )
+
+    session = ChatSession("linux-admin", "/config", runner=runner)
+    session.handle("Kiểm tra cổng 5432")
+    count = len(calls)
+    explanation = session.handle("Giải thích kết quả của cổng 5432")
+
+    assert len(calls) == count
+    assert "incident-5432" in explanation
+    assert "Observed local port evidence" in explanation
+
+
+def test_explicit_mismatched_cached_target_is_clarified_without_reusing_evidence():
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(
+            stdout=json.dumps(_payload("incident-5432")),
+            stderr="",
+            returncode=0,
+        )
+
+    session = ChatSession("linux-admin", "/config", runner=runner)
+    session.handle("Kiểm tra cổng 5432")
+    count = len(calls)
+    response = session.handle("Giải thích kết quả của cổng 8080")
+
+    assert len(calls) == count
+    assert "port 5432" in response
+    assert "port 8080" in response
+    assert "Observed local port evidence" not in response
+
+
+@pytest.mark.parametrize("non_object_json", ["[]", "null", '"not a result"'])
+def test_non_object_json_does_not_create_turn_or_break_later_commands(non_object_json):
+    calls = []
+    outputs = iter(
+        [
+            json.dumps(_payload("incident-before")),
+            non_object_json,
+            json.dumps(_payload("incident-after")),
+        ]
+    )
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(stdout=next(outputs), stderr="", returncode=0)
+
+    session = ChatSession("linux-admin", "/config", runner=runner)
+    session.handle("check port 5432")
+    response = session.handle("check port 8080")
+
+    assert "không phải đối tượng JSON" in response
+    assert len(calls) == 2
+    assert len(session.turns) == 1
+    assert session.turns[-1].incident_id == "incident-before"
+    assert "incident-before" in session.handle("details")
+    assert "incident-after" in session.handle("check port 443")
+    assert len(calls) == 3
+    history = session.handle("history")
+    assert "incident-before" in history
+    assert "incident-after" in history
+    assert "incident-8080" not in history
 
 
 def test_repeated_follow_ups_keep_the_resolved_target_and_provenance():
