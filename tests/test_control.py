@@ -1154,3 +1154,66 @@ def test_real_service_context_is_not_misclassified_as_test_only():
     assert not _is_test_only_follow_up_answer(
         "Endpoint được cung cấp bởi nginx.service; không được restart."
     )
+
+
+# ============================================================================
+# KHÁNH — Policy tests cho 6 tool read-only mới (theo bảng phân công)
+# ============================================================================
+
+NEW_READONLY_ACTIONS = [
+    "list_all_mounts",
+    "get_io_stats",
+    "list_listening_ports",
+    "get_kernel_log",
+    "check_auth_log",
+    "list_top_processes",
+]
+
+
+@pytest.mark.parametrize("action", NEW_READONLY_ACTIONS)
+def test_new_readonly_action_has_explicit_policy_rule(app_config, action: str) -> None:
+    """6 tool read-only mới phải có rule tường minh trong policy (không rơi vào default deny)."""
+    assert action in app_config.policy.actions, (
+        f"Action '{action}' chưa có trong policy.yaml — sẽ bị default_decision=deny chặn."
+    )
+
+
+@pytest.mark.parametrize("action", NEW_READONLY_ACTIONS)
+def test_new_readonly_action_is_allowed_without_approval(app_config, action: str) -> None:
+    """6 tool read-only mới phải allowed=True và requires_approval=False."""
+    rule = app_config.policy.actions.get(action)
+    assert rule is not None, f"Action '{action}' chưa có rule trong policy.yaml."
+    assert rule.allowed is True, (
+        f"Action '{action}' phải allowed=True (read-only, an toàn)."
+    )
+    assert rule.requires_approval is False, (
+        f"Action '{action}' phải requires_approval=False (read-only, không cần approval)."
+    )
+
+
+def test_default_decision_still_denies_unknown_actions(app_config) -> None:
+    """Default decision vẫn phải là deny (fail-closed) cho action không có rule."""
+    assert app_config.policy.default_decision == "deny"
+    assert "definitely_not_a_real_action" not in app_config.policy.actions
+
+
+def test_policy_yaml_declares_resource_threshold_80() -> None:
+    """Câu 1.1: policy.yaml phải khai báo ngưỡng 80% (đọc thô từ file, không qua AppConfig).
+
+    Lý do không dùng app_config: PolicySettings hiện chưa có field
+    resource_threshold_percent (trách nhiệm của diagnostics.py/agent.py — Phong).
+    Test này chỉ xác nhận YAML có khai báo đúng, để Phong đọc sau.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    policy_path = Path(__file__).resolve().parents[1] / "config" / "policy.yaml"
+    assert policy_path.exists(), f"Không tìm thấy {policy_path}"
+
+    with policy_path.open("r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh)
+
+    assert data["policy"]["resource_threshold_percent"] == 80, (
+        "policy.yaml phải khai báo resource_threshold_percent: 80 (câu 1.1)."
+    )
