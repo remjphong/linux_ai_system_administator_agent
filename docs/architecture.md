@@ -1,28 +1,80 @@
-# Architecture and shared interfaces
+# Architecture
 
-## Intended runtime flow
+## Runtime flow
 
-1. `main.py` starts the CLI and loads `config.py`.
-2. `agent.py` will create an `IncidentContext` and control the bounded workflow.
-3. The planner (initially rule-based, later optionally LLM-backed) chooses a registered tool.
-4. `registry.py` validates arguments and calls only explicitly registered tools.
-5. A tool returns `ToolResult` as defined in `contracts.py`.
-6. A proposed state-changing operation is represented as `ActionRequest`; it is not authorization.
-7. `control.py` will consult policy and approval rules before calling a controlled adapter.
-8. `verification.py` will inspect the actual post-action state.
-9. `audit.py` will persist important events after its SQLite implementation is added.
+```text
+CLI (main.py)
+  -> load_config (config.py)
+  -> register_builtin_tools (tools/__init__.py)
+  -> Agent / RuleBasedPlanner (agent.py)
+  -> ToolRegistry (registry.py)
+  -> real read-only tool adapters (tools/*.py)
+  -> ToolResult / IncidentContext (contracts.py)
+  -> structured JSON report
+  -> SQLite audit events (audit.py)
+```
 
-The full workflow above is the target design. In this starter package, configuration,
-contracts, registry, and the configuration-check CLI are implemented; later stages remain TODO.
+The CLI `--investigate` runs read-only diagnosis. It selects a bounded plan, invokes
+only registered non-mutating tools, stores summarized evidence, and returns a structured
+report. The explicit `--restart-service` CLI route creates an `ActionRequest`, evaluates
+policy, requests local console approval where required and configured, and delegates to
+`ControlledExecutor`; it then runs bounded read-only verification if an action may have
+executed. This action route remains inert under the default observe/dry-run configuration.
+LLM integration is optional and disabled by default; the rule-based planner works without
+an API or network connection.
 
-## Shared contract ownership
+## Control boundary for state-changing actions
 
-`contracts.py` is shared by A, B, and C. Do not change field names or statuses without
-coordinating the change and updating tests. Each tool exposes `.spec: ToolSpec` and
-`execute(**kwargs) -> ToolResult`.
+```text
+ActionRequest
+  -> PolicyEngine (control.py)
+  -> exact service allowlist / configured action rule
+  -> explicit ApprovalRecord bound to action ID + argument fingerprint
+  -> dry-run gate
+  -> ToolRegistry.invoke_authorized_action
+  -> RestartServiceTool (fixed systemctl argv; no shell or sudo)
+  -> verify_service_health / verify_endpoint (verification.py)
+  -> AuditLogger (audit.py)
+```
 
-## Safety boundary
+The investigation Agent cannot invoke a state-changing tool directly. `restart_service`
+is disabled by default in YAML and the adapter checks configuration again. A successful
+`systemctl restart` only indicates that the command was accepted; it is not proof that
+the service or its HTTP endpoint is healthy. Verification must determine that outcome.
 
-The LLM must not execute shell commands or grant itself permissions. Any system-changing
-action must pass deterministic policy checks, approval when required, a controlled executor,
-and a postcondition verification. Configuration currently keeps service restart disabled.
+## Module ownership
+
+- A: `contracts.py`, `config.py`, `agent.py`, `llm_client.py`, `registry.py`,
+  `audit.py`, CLI integration, end-to-end tests, packaging and README.
+- B: `tools/system.py`, `tools/logs.py`, `tools/network.py`, `tools/security.py`,
+  tool tests and the tool catalog.
+- C: `control.py`, `tools/services.py`, `verification.py`, policy/service configuration,
+  control tests, and safety/operations documentation.
+
+## Platform boundary
+
+`psutil`-based system and network-interface metrics are cross-platform. The service and
+journal adapters require Linux with systemd/journald and run fixed commands with bounded
+timeouts. Windows unit tests mock these commands; Ubuntu VM tests verify the real
+systemd behavior. HTTP diagnostic checks do not follow redirects and restrict inputs,
+but are not a general-purpose SSRF defense.
+
+## LLM planning and Tavily web search
+
+When `llm.enabled` (or `LLM_ENABLED=true`) is enabled, `Agent` uses the
+OpenAI-compatible chat completions adapter in `llm_client.py` to propose a
+structured read-only plan. The registered tool catalog and argument schemas are
+sent to the model; the response is parsed and checked against that catalog before
+the Agent invokes tools through `ToolRegistry`. System-changing tools remain
+blocked from the investigation workflow.
+
+After successful evidence collection, the same model receives bounded, redacted
+tool results and produces a report. If planning fails and `llm.fallback_to_rules`
+is true, the Agent records the fallback and uses `RuleBasedPlanner`. A synthesis
+failure is reported explicitly; local tool findings remain available.
+
+Tavily is an optional read-only web-search tool, registered only when
+`tavily.enabled` (or `TAVILY_ENABLED=true`) and `TAVILY_API_KEY` are configured.
+Tavily search can provide external documentation; it does not replace the chat
+LLM provider. Web results are untrusted content and are never proof of the local
+host's state.

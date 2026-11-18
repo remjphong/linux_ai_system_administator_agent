@@ -10,10 +10,11 @@ import copy
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Any, Literal, Mapping, Protocol
+from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 ToolStatus = Literal["success", "invalid_input", "denied", "timeout", "failed"]

@@ -51,6 +51,7 @@ def test_scenario_service_failure_collects_status_and_logs(
     assert not any(name == "restart_service" for name, _ in calls)
 
 
+
 def test_scenario_unreachable_endpoint_checks_tcp_http_and_service(
     app_config, audit_logger, registry_factory
 ) -> None:
@@ -87,11 +88,13 @@ def test_scenario_unreachable_endpoint_checks_tcp_http_and_service(
 
     assert incident.status == "completed"
     assert evidence["check_tcp_connectivity"]["reachable"] is False
+    assert evidence["check_http_endpoint"]["reachable"] is False
     assert evidence["check_http_endpoint"]["status_code"] == 503
-    assert evidence["get_service_status"]["active_state"] == "active"
-    assert "get_service_logs" in evidence
-    assert len(calls) == 4
-    assert not any(name == "restart_service" for name, _ in calls)
+
+    # Chi co URL, khong duoc tu suy doan service lien quan.
+    assert "get_service_status" not in evidence
+    assert "get_service_logs" not in evidence
+
 
 
 def test_scenario_disk_pressure_diagnoses_without_deleting_data(
@@ -155,3 +158,41 @@ def test_scenario_records_audit_for_each_incident(
     assert "incident.plan_created" in event_types
     assert "tool.completed" in event_types
     assert event_types[-1] == "incident.finished"
+
+def test_vietnamese_slow_request_routes_to_resource_tools(
+    app_config, audit_logger, registry_factory
+) -> None:
+    calls: list[tuple[str, dict]] = []
+    registry = registry_factory(
+        outputs={
+            "get_system_overview": {
+                "platform": "Linux",
+                "cpu_percent": 34.0,
+                "memory_percent": 47.6,
+                "swap_percent": 14.5,
+            },
+            "list_top_processes": {
+                "processes": [{"pid": 123, "name": "demo-process"}],
+                "limit": 10,
+            },
+        },
+        calls=calls,
+    )
+
+    incident = Agent(registry, app_config, audit_logger).run(
+        "Tại sao máy lại đang chạy chậm?"
+    )
+    evidence = _data_by_tool(incident)
+
+    assert incident.status == "completed"
+    assert "get_system_overview" in evidence
+    assert "list_top_processes" in evidence
+    assert "get_service_status" not in evidence
+    assert [name for name, _ in calls] == [
+        "get_system_overview",
+        "list_top_processes",
+    ]
+    assert any(
+        "resource_snapshot_no_pressure_signal" in item
+        for item in incident.findings
+    )

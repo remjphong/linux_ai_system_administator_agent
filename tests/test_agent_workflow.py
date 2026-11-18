@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
-from linux_admin.agent import Agent
+import pytest
+
+from linux_admin.agent import Agent, RuleBasedPlanner
 from linux_admin.contracts import ToolResult, ToolSpec
 from linux_admin.llm_client import AgentPlan, FakeLLMClient, PlanStep
 from linux_admin.registry import ToolRegistry
+from linux_admin.tools.logs import AuthLogTool, KernelLogTool
+from linux_admin.tools.network import (
+    ListeningPortTool,
+    ListListeningPortsTool,
+)
+from linux_admin.tools.system import (
+    IoStatsTool,
+    ListAllMountsTool,
+    SystemOverviewTool,
+    TopProcessesTool,
+)
 
 
 class StateChangingTestTool:
@@ -49,7 +62,7 @@ def test_agent_runs_rule_based_service_investigation(
         "get_service_logs",
     ]
     assert any(
-        "active_state='inactive'" in finding for finding in incident.findings
+        "currently inactive" in finding for finding in incident.findings
     )
     assert any(
         "does not mean the incident is repaired" in finding
@@ -124,7 +137,7 @@ def test_agent_records_failed_tool_and_continues_with_other_evidence(
     app_config, audit_logger, registry_factory
 ) -> None:
     registry = registry_factory(
-        failures={"get_service_status": "simulated permission error"}
+        failures={"get_failed_services": "simulated permission error"}
     )
     incident = Agent(
         registry=registry, config=app_config, audit=audit_logger
@@ -132,7 +145,9 @@ def test_agent_records_failed_tool_and_continues_with_other_evidence(
 
     assert incident.status == "completed"
     assert incident.evidence[0].status == "failed"
-    assert len(incident.evidence) == 3
+    assert len(incident.evidence) == 2
+    assert incident.evidence[1].tool_name == "get_recent_errors"
+    assert incident.evidence[1].ok
     assert any("Some tools failed" in item for item in incident.findings)
 
 
@@ -173,3 +188,866 @@ def test_audit_logger_redacts_secret_like_fields(tmp_path) -> None:
     assert event["details"]["api_key"] == "[REDACTED]"
     assert event["details"]["nested"]["password"] == "[REDACTED]"
     assert event["details"]["nested"]["result"] == "ok"
+
+def test_endpoint_plan_does_not_guess_backing_service(
+    app_config, registry_factory
+) -> None:
+    registry = registry_factory()
+    planner = RuleBasedPlanner(app_config)
+    available = [spec for spec in registry.list_tools() if not spec.changes_system]
+
+    plan = planner.create_plan(
+        "Check endpoint http://127.0.0.1:11434/", available
+    )
+
+    tool_names = [step.tool_name for step in plan.steps]
+    assert tool_names == ["check_tcp_connectivity", "check_http_endpoint"]
+    assert all("demo-web.service" not in str(step.arguments) for step in plan.steps)
+
+
+def test_endpoint_plan_checks_service_only_when_explicitly_named(
+    app_config, registry_factory
+) -> None:
+    registry = registry_factory()
+    planner = RuleBasedPlanner(app_config)
+    available = [spec for spec in registry.list_tools() if not spec.changes_system]
+
+    plan = planner.create_plan(
+        "Check endpoint http://127.0.0.1:18080/health and demo-web.service",
+        available,
+    )
+
+    tool_names = [step.tool_name for step in plan.steps]
+    assert tool_names == [
+        "check_tcp_connectivity",
+        "check_http_endpoint",
+        "get_service_status",
+        "get_service_logs",
+    ]
+    assert plan.steps[2].arguments["service_name"] == "demo-web.service"
+    assert plan.steps[3].arguments["service_name"] == "demo-web.service"
+
+
+def test_service_status_summary_prioritizes_not_found_over_inactive() -> None:
+    result = ToolResult(
+        tool_name="get_service_status",
+        status="success",
+        data={
+            "service_name": "demo-web.service",
+            "load_state": "not-found",
+            "active_state": "inactive",
+            "sub_state": "dead",
+            "is_active": False,
+            "loaded": False,
+        },
+    )
+
+    summary = Agent._summarize_result(result)
+
+    assert "was not found by systemd" in summary
+    assert "load_state=not-found" in summary
+    assert "currently inactive" not in summary
+
+
+def test_agent_skips_logs_for_systemd_unit_not_found(
+    app_config, audit_logger, registry_factory
+) -> None:
+    unit = "linux-admin-nonexistent-test.service"
+    calls: list[tuple[str, dict]] = []
+    registry = registry_factory(
+        outputs={
+            "get_service_status": {
+                "service_name": unit,
+                "load_state": "not-found",
+                "active_state": "inactive",
+                "sub_state": "dead",
+                "loaded": False,
+                "is_active": False,
+            },
+            "get_service_logs": {
+                "service_name": unit,
+                "lines": [],
+                "line_count": 0,
+                "since_minutes": 60,
+            },
+        },
+        calls=calls,
+    )
+
+    incident = Agent(
+        registry=registry,
+        config=app_config,
+        audit=audit_logger,
+    ).run(f"Check service status for {unit}")
+
+    assert incident.status == "completed"
+    assert [item.tool_name for item in incident.evidence] == [
+        "get_service_status"
+    ]
+    assert calls == [("get_service_status", {"service_name": unit})]
+    assert any(
+        "Skipped 1 queued get_service_logs check(s)" in finding
+        for finding in incident.findings
+    )
+
+    events = audit_logger.list_events(incident_id=incident.incident_id)
+    assert any(
+        event["event_type"] == "incident.plan_step_skipped"
+        and event["details"].get("reason") == "systemd_unit_not_found"
+        for event in events
+    )
+
+
+def test_agent_stops_before_tools_if_plan_audit_write_fails(
+    app_config, audit_logger, registry_factory, monkeypatch
+) -> None:
+    calls: list[tuple[str, dict]] = []
+    registry = registry_factory(
+        outputs={
+            "check_tcp_connectivity": {
+                "host": "127.0.0.1",
+                "port": 11434,
+                "reachable": True,
+            },
+            "check_http_endpoint": {
+                "url": "http://127.0.0.1:11434/",
+                "host": "127.0.0.1",
+                "port": 11434,
+                "reachable": True,
+                "healthy": True,
+                "status_code": 200,
+                "reason": "OK",
+                "redirect_followed": False,
+            },
+        },
+        calls=calls,
+    )
+
+    original_record_event = audit_logger.record_event
+
+    def fail_plan_event(
+        event_type, incident_id, details, action_id=None
+    ):
+        if event_type == "incident.plan_created":
+            raise RuntimeError("simulated audit failure")
+        return original_record_event(
+            event_type=event_type,
+            incident_id=incident_id,
+            details=details,
+            action_id=action_id,
+        )
+
+    monkeypatch.setattr(audit_logger, "record_event", fail_plan_event)
+
+    incident = Agent(registry, app_config, audit_logger).run(
+        "Check whether http://127.0.0.1:11434/ is reachable."
+    )
+
+    assert incident.status == "failed"
+    assert incident.steps == 0
+    assert incident.evidence == []
+    assert calls == []
+    assert any("no tools were invoked" in finding for finding in incident.findings)
+
+
+def test_agent_stops_after_tool_audit_write_fails(
+    app_config, audit_logger, registry_factory, monkeypatch
+) -> None:
+    calls: list[tuple[str, dict]] = []
+    registry = registry_factory(
+        outputs={
+            "check_tcp_connectivity": {
+                "host": "127.0.0.1",
+                "port": 11434,
+                "reachable": True,
+            },
+            "check_http_endpoint": {
+                "url": "http://127.0.0.1:11434/",
+                "host": "127.0.0.1",
+                "port": 11434,
+                "reachable": True,
+                "healthy": True,
+                "status_code": 200,
+                "reason": "OK",
+                "redirect_followed": False,
+            },
+        },
+        calls=calls,
+    )
+
+    original_record_event = audit_logger.record_event
+
+    def fail_tool_event(
+        event_type, incident_id, details, action_id=None
+    ):
+        if event_type == "tool.completed":
+            raise RuntimeError("simulated audit failure")
+        return original_record_event(
+            event_type=event_type,
+            incident_id=incident_id,
+            details=details,
+            action_id=action_id,
+        )
+
+    monkeypatch.setattr(audit_logger, "record_event", fail_tool_event)
+
+    incident = Agent(registry, app_config, audit_logger).run(
+        "Check whether http://127.0.0.1:11434/ is reachable."
+    )
+
+    assert incident.status == "failed"
+    assert incident.steps == 1
+    assert len(incident.evidence) == 1
+    assert len(calls) == 1
+    assert any("Audit persistence failed" in finding for finding in incident.findings)
+
+
+def test_service_status_summary_does_not_treat_inactive_as_failure() -> None:
+    result = ToolResult(
+        tool_name="get_service_status",
+        status="success",
+        data={
+            "service_name": "anacron.service",
+            "load_state": "loaded",
+            "active_state": "inactive",
+            "sub_state": "dead",
+            "service_type": "simple",
+            "result": "success",
+            "exec_main_status": "0",
+            "remain_after_exit": "no",
+            "is_active": False,
+            "loaded": True,
+        },
+    )
+
+    summary = Agent._summarize_result(result)
+
+    assert "currently inactive" in summary
+    assert "last execution result as success" in summary
+    assert "does not establish a failure" in summary
+
+
+
+
+def test_agent_adaptively_inspects_refused_loopback_port(
+    app_config, audit_logger, registry_factory
+) -> None:
+    url = "http://127.0.0.1:1/"
+    calls: list[tuple[str, dict]] = []
+    registry = registry_factory(
+        outputs={
+            "check_tcp_connectivity": {
+                "host": "127.0.0.1",
+                "port": 1,
+                "reachable": False,
+                "error_type": "ConnectionRefusedError",
+            },
+            "check_http_endpoint": {
+                "url": url,
+                "host": "127.0.0.1",
+                "port": 1,
+                "reachable": False,
+                "healthy": False,
+                "status_code": None,
+                "error_type": "ConnectionRefusedError",
+            },
+            "inspect_listening_port": {
+                "port": 1,
+                "listeners": [],
+                "count": 0,
+                "supported": True,
+            },
+            "get_recent_errors": {"errors": []},
+        },
+        calls=calls,
+    )
+
+    incident = Agent(
+        registry=registry, config=app_config, audit=audit_logger
+    ).run(f"Check endpoint {url} for connectivity")
+
+    names = [result.tool_name for result in incident.evidence]
+    assert incident.status == "completed"
+    assert names == [
+        "check_tcp_connectivity",
+        "inspect_listening_port",
+        "check_http_endpoint",
+        "get_recent_errors",
+    ]
+    assert calls[1] == ("inspect_listening_port", {"port": 1})
+    assert any(
+        "Adaptive follow-up selected: inspect_listening_port" in finding
+        for finding in incident.findings
+    )
+
+
+
+def test_agent_adaptively_inspects_reported_failed_service(
+    app_config, audit_logger, registry_factory
+) -> None:
+    unit = "demo-web.service"
+    calls: list[tuple[str, dict]] = []
+    registry = registry_factory(
+        outputs={
+            "get_failed_services": {"failed_services": [unit]},
+            "get_service_status": {
+                "service_name": unit,
+                "load_state": "loaded",
+                "active_state": "failed",
+                "sub_state": "failed",
+                "result": "exit-code",
+            },
+            "get_service_logs": {
+                "service_name": unit,
+                "lines": ["Main process exited with status 1"],
+            },
+            "get_recent_errors": {"errors": []},
+        },
+        calls=calls,
+    )
+
+    incident = Agent(
+        registry=registry, config=app_config, audit=audit_logger
+    ).run("Investigate service failure")
+
+    names = [result.tool_name for result in incident.evidence]
+    assert incident.status == "completed"
+    assert names == [
+        "get_failed_services",
+        "get_service_status",
+        "get_service_logs",
+        "get_recent_errors",
+    ]
+    assert calls[1] == ("get_service_status", {"service_name": unit})
+    assert calls[2] == ("get_service_logs", {"service_name": unit})
+    assert any(
+        "Adaptive follow-up selected: get_service_status" in finding
+        for finding in incident.findings
+    )
+
+@pytest.mark.parametrize(
+    ("user_text", "expected", "arguments"),
+    [
+        ("List all mounts", "list_all_mounts", {}),
+        ("Inspect disk I/O and iowait", "get_io_stats", {"sample_seconds": 1.0}),
+        ("List listening ports", "list_listening_ports", {}),
+        ("Inspect kernel OOM errors", "get_kernel_log",
+         {"lines": 50, "since_minutes": 60, "priority": "err"}),
+        ("Investigate SSH failed login anomalies", "check_auth_log",
+         {"lines": 100, "since_minutes": 60, "brute_force_threshold": 10}),
+        ("Investigate port 5432", "inspect_listening_port", {"port": 5432}),
+        ("Kiểm tra cổng 5432", "inspect_listening_port", {"port": 5432}),
+        ("CPU usage high", "list_top_processes", {"limit": 10, "sort_by": "cpu"}),
+        ("RAM usage high", "list_top_processes", {"limit": 10, "sort_by": "memory"}),
+        ("CPU RAM bottleneck", "list_top_processes",
+         {"limit": 10, "sort_by": "both"}),
+    ],
+)
+def test_r02_routes_read_only_specializations(app_config, user_text, expected, arguments):
+    specs = [
+        tool.spec for tool in (
+            ListAllMountsTool, IoStatsTool, ListListeningPortsTool,
+            ListeningPortTool, KernelLogTool, AuthLogTool,
+            TopProcessesTool, SystemOverviewTool,
+        )
+    ]
+    specs.append(ToolSpec(
+        name="restart_service", description="must not be selected",
+        risk_level="high", changes_system=True, requires_approval=True,
+    ))
+    plan = RuleBasedPlanner(app_config).create_plan(user_text, specs)
+    steps = [step for step in plan.steps if step.tool_name == expected]
+    assert len(steps) == 1
+    assert steps[0].arguments == arguments
+    assert "restart_service" not in [step.tool_name for step in plan.steps]
+    assert len(plan.steps) <= app_config.agent.max_steps
+
+
+def test_r02_legacy_process_schema_never_receives_sort_by(app_config):
+    legacy = ToolSpec(
+        name="list_top_processes", description="legacy process list",
+        parameters={"type": "object", "properties": {
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        }, "required": ["limit"], "additionalProperties": False},
+    )
+    plan = RuleBasedPlanner(app_config).create_plan("CPU usage high", [legacy])
+    assert plan.steps[0].arguments == {"limit": 10}
+
+
+def test_r02_unregistered_specializations_are_not_invented(app_config):
+    plan = RuleBasedPlanner(app_config).create_plan("Inspect kernel OOM", [])
+    assert plan.steps == ()
+
+
+def test_r02_port_5432_does_not_guess_postgresql_service(app_config):
+    tools = [
+        ListeningPortTool.spec, ListListeningPortsTool.spec,
+        ToolSpec(name="get_service_status", description="status"),
+        ToolSpec(name="get_service_logs", description="logs"),
+        ToolSpec(name="check_tcp_connectivity", description="tcp"),
+    ]
+    plan = RuleBasedPlanner(app_config).create_plan(
+        "Why is port 5432 not listening?", tools,
+    )
+    assert {step.tool_name for step in plan.steps} == {
+        "inspect_listening_port", "list_listening_ports",
+    }
+    assert plan.steps[0].arguments == {"port": 5432}
+
+
+def test_r02_port_out_of_range_never_probes_arbitrary_endpoint(app_config):
+    plan = RuleBasedPlanner(app_config).create_plan(
+        "Investigate port 99999", [ListeningPortTool.spec],
+    )
+    assert plan.steps == ()
+
+
+def test_r02_agent_never_executes_mutating_tool_for_mount_investigation(
+    app_config, audit_logger,
+):
+    class FakeMountTool:
+        spec = ListAllMountsTool.spec
+
+        def execute(self, **kwargs):
+            assert kwargs == {}
+            return ToolResult(
+                tool_name="list_all_mounts", status="success",
+                data={"mounts": [{"mount_point": "/data", "used_percent": 85.0}]},
+            )
+
+    mutator = StateChangingTestTool()
+    registry = ToolRegistry()
+    registry.register(FakeMountTool())
+    registry.register(mutator)
+    incident = Agent(registry, app_config, audit_logger).run("List all mounts")
+    assert incident.status == "completed"
+    assert not mutator.called
+    assert any("Mount /data reported 85.0%" in line for line in incident.findings)
+
+
+def test_r02_hybrid_complex_specialization_does_not_call_llm(app_config):
+    from linux_admin.agent import HybridPlanner
+
+    class UnexpectedLLM:
+        def create_plan(self, user_request, available_tools):
+            raise AssertionError("Specialized local investigation must be deterministic")
+
+    planner = HybridPlanner(
+        app_config, RuleBasedPlanner(app_config), UnexpectedLLM(),
+    )
+    plan = planner.create_plan(
+        "Compare kernel OOM with disk I/O",
+        [KernelLogTool.spec, IoStatsTool.spec],
+    )
+    assert {step.tool_name for step in plan.steps} == {
+        "get_kernel_log", "get_io_stats",
+    }
+
+
+# R03 / R02-FIX-01B — Offline regression for the exact QA-08 phrasing.
+def _r03_read_only_specs() -> list[ToolSpec]:
+    from linux_admin.tools.system import DiskUsageTool
+
+    return [
+        ListAllMountsTool.spec, IoStatsTool.spec, ListListeningPortsTool.spec,
+        ListeningPortTool.spec, KernelLogTool.spec, AuthLogTool.spec,
+        TopProcessesTool.spec, SystemOverviewTool.spec, DiskUsageTool.spec,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("user_text", "expected_tool"),
+    [
+        ("Kiểm tra tất cả mount point", "list_all_mounts"),
+        ("Kiểm tra disk I/O wait", "get_io_stats"),
+        ("Liệt kê tất cả port đang LISTEN", "list_listening_ports"),
+        ("Kiểm tra kernel log lỗi", "get_kernel_log"),
+        ("Kiểm tra authentication log và brute force", "check_auth_log"),
+        ("Liệt kê top 5 tiến trình sử dụng CPU và RAM", "list_top_processes"),
+        ("Kiểm tra dung lượng ổ đĩa", "get_disk_usage"),
+    ],
+)
+def test_r03_original_seven_qa_routes(
+    app_config, user_text, expected_tool,
+) -> None:
+    specs = _r03_read_only_specs() + [StateChangingTestTool.spec]
+    by_name = {spec.name: spec for spec in specs}
+    plan = RuleBasedPlanner(app_config).create_plan(user_text, specs)
+    names = [step.tool_name for step in plan.steps]
+    assert expected_tool in names
+    assert "restart_service" not in names
+    assert len(plan.steps) <= app_config.agent.max_steps
+    for step in plan.steps:
+        spec = by_name[step.tool_name]
+        assert not spec.changes_system
+        assert ToolRegistry._validate_arguments(spec, dict(step.arguments)) is None
+
+
+@pytest.mark.parametrize(
+    "user_text",
+    [
+        "Liệt kê tất cả port đang LISTEN",
+        "Liệt kê các port LISTEN",
+        "Show ports in LISTEN state",
+        "Liệt kê các cổng đang lắng nghe",
+    ],
+)
+def test_r03_four_listen_variants_route_to_listeners(
+    app_config, user_text,
+) -> None:
+    specs = _r03_read_only_specs() + [StateChangingTestTool.spec]
+    plan = RuleBasedPlanner(app_config).create_plan(user_text, specs)
+    assert [step.tool_name for step in plan.steps] == ["list_listening_ports"]
+    assert plan.steps[0].arguments == {}
+    assert ToolRegistry._validate_arguments(
+        ListListeningPortsTool.spec, dict(plan.steps[0].arguments)
+    ) is None
+
+
+def test_r03_listen_evidence_and_read_only_safety(
+    app_config, audit_logger,
+) -> None:
+    class FakeListeners:
+        spec = ListListeningPortsTool.spec
+
+        def execute(self, **kwargs):
+            assert kwargs == {}
+            return ToolResult(
+                tool_name="list_listening_ports",
+                status="success",
+                data={
+                    "count": 2,
+                    "sockets": [
+                        {"protocol": "tcp", "local_address": "127.0.0.1",
+                         "local_port": 5432, "pid": 123},
+                        {"protocol": "tcp", "local_address": "0.0.0.0",
+                         "local_port": 8080, "pid": 234},
+                    ],
+                },
+            )
+
+    registry = ToolRegistry()
+    registry.register(FakeListeners())
+    mutating_trap = StateChangingTestTool()
+    registry.register(mutating_trap)
+    incident = Agent(
+        registry=registry, config=app_config, audit=audit_logger
+    ).run("Liệt kê tất cả port đang LISTEN")
+
+    assert incident.status == "completed"
+    assert [item.tool_name for item in incident.evidence] == [
+        "list_listening_ports"
+    ]
+    assert incident.evidence[0].data["count"] == 2
+    assert any(
+        "Confirmed fact: Local inspection returned 2 TCP listening socket(s)."
+        in finding
+        for finding in incident.findings
+    )
+    assert any(
+        "Unconfirmed hypothesis:" in finding for finding in incident.findings
+    )
+    assert not mutating_trap.called
+
+
+def test_r03_cpu_ram_and_explicit_port_routes_preserved(app_config) -> None:
+    specs = _r03_read_only_specs() + [StateChangingTestTool.spec]
+    planner = RuleBasedPlanner(app_config)
+    cpu_ram = planner.create_plan(
+        "Liệt kê top 5 tiến trình sử dụng CPU và RAM", specs
+    )
+    both = [
+        step for step in cpu_ram.steps if step.tool_name == "list_top_processes"
+    ]
+    assert len(both) == 1
+    assert both[0].arguments["sort_by"] == "both"
+    assert 1 <= both[0].arguments["limit"] <= 50
+    assert ToolRegistry._validate_arguments(
+        TopProcessesTool.spec, dict(both[0].arguments)
+    ) is None
+
+    port = planner.create_plan("Investigate port 5432", specs)
+    assert [step.tool_name for step in port.steps] == [
+        "inspect_listening_port", "list_listening_ports"
+    ]
+    assert port.steps[0].arguments == {"port": 5432}
+
+
+def test_r03_cpu_ram_both_output_evidence_preserved() -> None:
+    from linux_admin.diagnostics import synthesize_specialized_evidence
+
+    evidence = [ToolResult(
+        tool_name="list_top_processes", status="success",
+        data={
+            "sort_by": "both", "limit": 5,
+            "top_cpu": [{"pid": 101, "cpu_percent": 75.0}],
+            "top_memory": [{"pid": 202, "memory_percent": 60.0}],
+        },
+    )]
+    findings = synthesize_specialized_evidence("CPU RAM top 5", evidence)
+    assert any(
+        "Confirmed fact: The CPU process ranking contains 1" in line
+        for line in findings
+    )
+    assert any(
+        "Confirmed fact: The RAM process ranking contains 1" in line
+        for line in findings
+    )
+    assert any(
+        "Unconfirmed hypothesis:" in line for line in findings
+    )
+
+
+def test_r03_explicit_endpoint_route_unchanged(app_config) -> None:
+    from linux_admin.tools.network import HttpEndpointTool, TcpConnectivityTool
+
+    plan = RuleBasedPlanner(app_config).create_plan(
+        "Check whether http://127.0.0.1:5432/ is reachable",
+        [HttpEndpointTool.spec, TcpConnectivityTool.spec,
+         ListListeningPortsTool.spec, StateChangingTestTool.spec],
+    )
+    assert [step.tool_name for step in plan.steps] == [
+        "check_tcp_connectivity", "check_http_endpoint"
+    ]
+    assert plan.steps[0].arguments == {"host": "127.0.0.1", "port": 5432}
+    assert plan.steps[1].arguments == {"url": "http://127.0.0.1:5432/"}
+
+
+def test_r03_registry_denies_unapproved_restart() -> None:
+    registry = ToolRegistry()
+    mutating_trap = StateChangingTestTool()
+    registry.register(mutating_trap)
+    outcome = registry.invoke(
+        "restart_service", {"service_name": "qa-not-allowlisted.service"}
+    )
+    assert outcome.status == "denied"
+    assert not mutating_trap.called
+
+
+# R03 / R02-FIX-01C — explicit top-5 only; preserve other R02 defaults.
+@pytest.mark.parametrize(
+    ("user_text", "expected_args"),
+    [
+        (
+            "Liệt kê top 5 tiến trình sử dụng CPU và RAM",
+            {"limit": 5, "sort_by": "both"},
+        ),
+        (
+            "CPU RAM bottleneck",
+            {"limit": 10, "sort_by": "both"},
+        ),
+        (
+            "CPU usage high",
+            {"limit": 10, "sort_by": "cpu"},
+        ),
+        (
+            "RAM usage high",
+            {"limit": 10, "sort_by": "memory"},
+        ),
+        (
+            "List top 50 CPU RAM processes",
+            {"limit": 10, "sort_by": "both"},
+        ),
+    ],
+)
+def test_r03_01c_explicit_top5_only_keeps_other_process_defaults(
+    app_config, user_text, expected_args,
+) -> None:
+    specs = _r03_read_only_specs() + [StateChangingTestTool.spec]
+    plan = RuleBasedPlanner(app_config).create_plan(user_text, specs)
+    process_steps = [
+        step for step in plan.steps if step.tool_name == "list_top_processes"
+    ]
+    assert len(process_steps) == 1
+    assert dict(process_steps[0].arguments) == expected_args
+    assert ToolRegistry._validate_arguments(
+        TopProcessesTool.spec, dict(process_steps[0].arguments)
+    ) is None
+    assert all(step.tool_name != "restart_service" for step in plan.steps)
+
+
+# INT-FIX-01 — Execute the real Agent loop against deterministic fake tools.
+INT_FIX_01_URL = "https://example.invalid/health"
+INT_FIX_01_MANY = (
+    "List all mounts, inspect disk I/O wait, "
+    "Liệt kê tất cả port đang LISTEN, kernel OOM, SSH failed login, "
+    f"and check endpoint {INT_FIX_01_URL}"
+)
+
+
+def _int_fix_01_fake_registry(registry_factory, calls):
+    """Use registered read-only fake tools; never touch host/network."""
+    registry = registry_factory(
+        calls=calls,
+        outputs={
+            "check_tcp_connectivity": {
+                "host": "example.invalid", "port": 443, "reachable": True,
+            },
+            "check_http_endpoint": {
+                "url": INT_FIX_01_URL, "host": "example.invalid", "port": 443,
+                "reachable": True, "healthy": True, "status_code": 200,
+            },
+        },
+    )
+
+    class SpecializedFake:
+        def __init__(self, spec):
+            self.spec = spec
+
+        def execute(self, **kwargs):
+            calls.append((self.spec.name, dict(kwargs)))
+            return ToolResult(
+                tool_name=self.spec.name,
+                status="success",
+                data={},
+            )
+
+    for spec in (
+        ListAllMountsTool.spec, IoStatsTool.spec, ListListeningPortsTool.spec,
+        KernelLogTool.spec, AuthLogTool.spec,
+    ):
+        registry.register(SpecializedFake(spec))
+    mutator = StateChangingTestTool()
+    registry.register(mutator)
+    return registry, mutator
+
+
+def test_int_fix_01_mixed_many_explicit_endpoint_executes_first(
+    app_config, audit_logger, registry_factory,
+) -> None:
+    """Original P1 reproduction: five specialized probes starved TCP and HTTP."""
+    assert app_config.agent.max_steps == 5
+    calls = []
+    registry, mutator = _int_fix_01_fake_registry(registry_factory, calls)
+
+    incident = Agent(registry, app_config, audit_logger).run(INT_FIX_01_MANY)
+    executed = [name for name, _ in calls]
+    evidence = [result.tool_name for result in incident.evidence]
+    assert executed[:2] == ["check_tcp_connectivity", "check_http_endpoint"]
+    assert calls[:2] == [
+        ("check_tcp_connectivity", {"host": "example.invalid", "port": 443}),
+        ("check_http_endpoint", {"url": INT_FIX_01_URL}),
+    ]
+    assert evidence == executed
+    assert executed == [
+        "check_tcp_connectivity", "check_http_endpoint",
+        "list_all_mounts", "get_io_stats", "list_listening_ports",
+    ]
+    assert incident.steps == len(calls) == 5
+    assert incident.status == "completed"
+    assert any("Plan limited to 5 steps" in text for text in incident.findings)
+    assert not any(item.tool_name in ("get_kernel_log", "check_auth_log")
+                   for item in incident.evidence)
+    assert not mutator.called
+
+
+def test_int_fix_01_mixed_few_executes_both_endpoint_and_specialized(
+    app_config, audit_logger, registry_factory,
+) -> None:
+    calls = []
+    registry, mutator = _int_fix_01_fake_registry(registry_factory, calls)
+    incident = Agent(registry, app_config, audit_logger).run(
+        f"List all mounts, inspect kernel OOM and check endpoint {INT_FIX_01_URL}"
+    )
+    assert [name for name, _ in calls] == [
+        "check_tcp_connectivity", "check_http_endpoint",
+        "list_all_mounts", "get_kernel_log",
+    ]
+    assert [result.tool_name for result in incident.evidence] == [
+        name for name, _ in calls
+    ]
+    assert incident.steps == 4
+    assert not mutator.called
+
+
+def test_int_fix_01_endpoint_only_executes_tcp_and_http(
+    app_config, audit_logger, registry_factory,
+) -> None:
+    calls = []
+    registry, mutator = _int_fix_01_fake_registry(registry_factory, calls)
+    incident = Agent(registry, app_config, audit_logger).run(
+        f"Check endpoint {INT_FIX_01_URL}"
+    )
+    assert calls == [
+        ("check_tcp_connectivity", {"host": "example.invalid", "port": 443}),
+        ("check_http_endpoint", {"url": INT_FIX_01_URL}),
+    ]
+    assert len(incident.evidence) == incident.steps == 2
+    assert not mutator.called
+
+
+def test_int_fix_01_multi_endpoint_route_remains_bounded(
+    app_config, audit_logger, registry_factory,
+) -> None:
+    from linux_admin.agent import HybridPlanner
+
+    second_url = "http://example.invalid:8080/ready"
+    calls = []
+    registry, mutator = _int_fix_01_fake_registry(registry_factory, calls)
+    unused_llm = FakeLLMClient(
+        default_plan=AgentPlan(steps=(), rationale="Unused LLM plan"),
+    )
+    planner = HybridPlanner(app_config, RuleBasedPlanner(app_config), unused_llm)
+    incident = Agent(registry, app_config, audit_logger, planner=planner).run(
+        f"Check endpoints {INT_FIX_01_URL} and {second_url}"
+    )
+    assert calls == [
+        ("check_http_endpoint", {"url": INT_FIX_01_URL}),
+        ("check_http_endpoint", {"url": second_url}),
+        ("check_tcp_connectivity", {"host": "example.invalid", "port": 443}),
+        ("check_tcp_connectivity", {"host": "example.invalid", "port": 8080}),
+    ]
+    assert [item.tool_name for item in incident.evidence] == [
+        name for name, _ in calls
+    ]
+    assert incident.steps == 4
+    assert not mutator.called
+
+
+def test_int_fix_01_configured_connectivity_is_not_explicit_priority(
+    app_config, audit_logger, registry_factory,
+) -> None:
+    from dataclasses import replace
+
+    configured = replace(
+        app_config,
+        agent=replace(
+            app_config.agent,
+            connectivity_check_url="https://example.invalid/health",
+        ),
+    )
+    calls = []
+    registry, mutator = _int_fix_01_fake_registry(registry_factory, calls)
+    incident = Agent(registry, configured, audit_logger).run(
+        "List all mounts and inspect network connectivity"
+    )
+    names = [name for name, _ in calls]
+    assert names[:3] == [
+        "list_all_mounts", "check_tcp_connectivity", "check_http_endpoint",
+    ]
+    assert [item.tool_name for item in incident.evidence] == names
+    assert incident.steps <= 5
+    assert not mutator.called
+
+
+def test_int_fix_01_hybrid_reports_omitted_checks(
+    app_config, audit_logger, registry_factory,
+) -> None:
+    from linux_admin.agent import HybridPlanner
+
+    calls = []
+    registry, mutator = _int_fix_01_fake_registry(registry_factory, calls)
+    planner = HybridPlanner(
+        app_config,
+        RuleBasedPlanner(app_config),
+        FakeLLMClient(default_plan=AgentPlan(steps=(), rationale="Unused")),
+    )
+    incident = Agent(registry, app_config, audit_logger, planner=planner).run(
+        INT_FIX_01_MANY
+    )
+    assert [name for name, _ in calls][:2] == [
+        "check_tcp_connectivity", "check_http_endpoint",
+    ]
+    assert incident.steps == len(calls) == 5
+    assert any("omitted and not performed" in line for line in incident.findings)
+    assert not mutator.called

@@ -101,6 +101,13 @@ class ConfiguredFakeTool:
                 "reachable": False,
                 "status_code": 503,
             }
+        if name == "inspect_listening_port":
+            return {
+                "port": args["port"],
+                "listeners": [],
+                "count": 0,
+                "supported": True,
+            }
         if name == "get_recent_errors":
             return {"errors": []}
         if name == "inspect_security_posture":
@@ -211,7 +218,43 @@ def registry_factory() -> Callable[..., ToolRegistry]:
                 "additionalProperties": False,
             },
         ),
-        ToolSpec(name="get_recent_errors", description="Fake recent errors"),
+        ToolSpec(
+            name="inspect_listening_port",
+            description="Fake local listening-port inspection",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "port": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 65535,
+                    },
+                },
+                "required": ["port"],
+                "additionalProperties": False,
+            },
+        ),
+        ToolSpec(
+            name="get_recent_errors",
+            description="Fake recent errors",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "lines": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 200,
+                    },
+                    "since_minutes": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1440,
+                    },
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+        ),
         ToolSpec(name="inspect_security_posture", description="Fake security checks"),
     )
 

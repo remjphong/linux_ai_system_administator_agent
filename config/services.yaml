@@ -1,0 +1,6 @@
+services:
+  # This is only an example allowlist entry. The service must exist in the test VM.
+  allowlist:
+    - demo-web.service
+  # Must remain false until policy, approval, executor and verification are tested.
+  restart_enabled: false
