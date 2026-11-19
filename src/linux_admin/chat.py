@@ -127,6 +127,16 @@ class ChatSession:
                     f"bằng chứng đã lưu cho {requested}. Hãy kiểm tra mục tiêu đó "
                     "trước rồi yêu cầu giải thích lại."
                 )
+            if requested_targets and set(requested_targets) != set(turn.targets):
+                recorded_targets = ", ".join(turn.targets) or "không có mục tiêu rõ ràng"
+                requested = ", ".join(requested_targets)
+                return (
+                    f"Kết quả đã lưu thuộc toàn bộ sự cố với các mục tiêu: "
+                    f"{recorded_targets}. Bằng chứng được lưu ở cấp sự cố, "
+                    f"không gắn riêng từng mục tiêu, nên chưa thể giải thích "
+                    f"{requested} như một kết quả độc lập. Bạn muốn tôi giải "
+                    "thích kết quả chung của toàn bộ sự cố không?"
+                )
             return self._explain_cached(turn)
 
         targets = _targets(value)
@@ -209,6 +219,11 @@ class ChatSession:
     def _explain_cached(turn: Turn) -> str:
         """Explain the most recent cached result without launching the CLI."""
         lines = [f"Kết quả điều tra {turn.incident_id or 'không có incident ID'}:"]
+        if turn.targets:
+            lines.append(f"Phạm vi toàn sự cố: {', '.join(turn.targets)}.")
+            lines.append(
+                "Evidence được lưu ở cấp sự cố, không được gắn riêng cho từng mục tiêu."
+            )
         lines.extend(f"- {finding}" for finding in turn.findings)
         lines.extend(f"- Bằng chứng: {item}" for item in turn.evidence)
         if not turn.findings and not turn.evidence:

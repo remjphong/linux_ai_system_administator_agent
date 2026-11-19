@@ -149,6 +149,84 @@ def test_explicit_mismatched_cached_target_is_clarified_without_reusing_evidence
     assert "Observed local port evidence" not in response
 
 
+@pytest.mark.parametrize("target", ["port 5432", "port 8080"])
+def test_explicit_subset_of_multi_target_incident_is_clarified(target):
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(
+            stdout=json.dumps(_payload("incident-multi")),
+            stderr="",
+            returncode=0,
+        )
+
+    session = ChatSession("linux-admin", "/config", runner=runner)
+    session.handle("Check port 5432 and port 8080")
+    count = len(calls)
+    response = session.handle(f"Giải thích kết quả của {target}")
+
+    assert len(calls) == count
+    assert "port 5432" in response and "port 8080" in response
+    assert "không gắn riêng từng mục tiêu" in response
+    assert "Observed local port evidence" not in response
+
+
+def test_explicit_complete_multi_target_explanation_discloses_incident_scope():
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(
+            stdout=json.dumps(_payload("incident-multi")),
+            stderr="",
+            returncode=0,
+        )
+
+    session = ChatSession("linux-admin", "/config", runner=runner)
+    session.handle("Check port 5432 and port 8080")
+    count = len(calls)
+    response = session.handle(
+        "Giải thích kết quả của port 8080 và port 5432"
+    )
+
+    assert len(calls) == count
+    assert "Phạm vi toàn sự cố: port 5432, port 8080." in response
+    assert "không được gắn riêng cho từng mục tiêu" in response
+    assert "Observed local port evidence" in response
+
+
+def test_unqualified_multi_target_explanation_discloses_whole_incident_scope():
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(
+            stdout=json.dumps(_payload("incident-multi")),
+            stderr="",
+            returncode=0,
+        )
+
+    session = ChatSession("linux-admin", "/config", runner=runner)
+    session.handle("Check port 5432 and port 8080")
+    count = len(calls)
+    response = session.handle("Giải thích rõ hơn kết quả vừa rồi")
+
+    assert len(calls) == count
+    assert "Phạm vi toàn sự cố: port 5432, port 8080." in response
+    assert "không được gắn riêng cho từng mục tiêu" in response
+
+
+def test_cached_explanation_without_prior_result_clarifies_without_child():
+    calls = []
+    session = ChatSession("linux-admin", "/config", runner=lambda *a, **k: calls.append(a))
+
+    response = session.handle("Giải thích kết quả của port 5432")
+
+    assert "Chưa có kết quả" in response
+    assert calls == []
+
+
 @pytest.mark.parametrize("non_object_json", ["[]", "null", '"not a result"'])
 def test_non_object_json_does_not_create_turn_or_break_later_commands(non_object_json):
     calls = []
