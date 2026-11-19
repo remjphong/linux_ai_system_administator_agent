@@ -41,6 +41,7 @@ class Turn:
     evidence: list[str]
     details: str
     targets: list[str]
+    tools: list[str]
 
 
 def _targets(request: str) -> list[str]:
@@ -75,6 +76,24 @@ def _result_context(payload: dict[str, Any]) -> tuple[list[str], list[str]]:
     return findings, evidence
 
 
+def _tool_rows(payload: dict[str, Any]) -> list[str]:
+    evidence = payload.get("evidence")
+    if not isinstance(evidence, list):
+        return []
+    rows = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        name, status = item.get("tool_name"), item.get("status")
+        if not all(isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9_]+", value)
+                   for value in (name, status)):
+            continue
+        duration = item.get("duration_ms")
+        timing = f" ({duration} ms)" if type(duration) is int and duration >= 0 else ""
+        rows.append(f"  {name} — {status}{timing}")
+    return rows
+
+
 class ChatSession:
     """Run CLI investigations while retaining a bounded context window."""
 
@@ -83,6 +102,7 @@ class ChatSession:
         self.config_dir = config_dir
         self.runner = runner
         self.turns: deque[Turn] = deque(maxlen=_HISTORY_LIMIT)
+        self.tools_expanded = False
 
     def handle(self, request: str) -> str:
         """Handle a user line and return a response without doing I/O itself."""
@@ -93,7 +113,7 @@ class ChatSession:
         if command == "help":
             return (
                 "Gửi yêu cầu kiểm tra hệ thống. Lệnh: help, history, details, "
-                "clear, exit."
+                "tools, clear, exit."
             )
         if command == "history":
             if not self.turns:
@@ -104,7 +124,15 @@ class ChatSession:
             )
         if command == "details":
             return self.turns[-1].details if self.turns else "Chưa có kết quả để xem."
+        if command == "tools":
+            if not self.turns:
+                return "Chưa có kết quả điều tra để xem công cụ."
+            if not self.turns[-1].tools:
+                return "Kết quả gần nhất không ghi nhận công cụ nào."
+            self.tools_expanded = not self.tools_expanded
+            return self._tools_view()
         if command == "clear":
+            self.tools_expanded = False
             self.turns.clear()
             return "Đã xóa lịch sử và ngữ cảnh của phiên chat."
         if not value:
@@ -211,9 +239,18 @@ class ChatSession:
                 evidence=evidence,
                 details=json.dumps(payload, ensure_ascii=False, indent=2),
                 targets=targets,
+                tools=_tool_rows(payload),
             )
         )
-        return _render_user_report(payload, result.returncode)
+        self.tools_expanded = False
+        return f"{_render_user_report(payload, result.returncode)}\n\n{self._tools_view()}"
+
+    def _tools_view(self) -> str:
+        rows = self.turns[-1].tools
+        title = f"Công cụ đã sử dụng ({len(rows)})"
+        if self.tools_expanded:
+            return "\n".join([f"▼ {title}", *rows])
+        return f"▶ {title} — nhập tools để mở"
 
     @staticmethod
     def _explain_cached(turn: Turn) -> str:

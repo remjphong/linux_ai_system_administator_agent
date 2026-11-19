@@ -366,3 +366,45 @@ def test_session_history_is_bounded_to_eight_results():
     assert "request 0" not in history
     assert "request 1" not in history
     assert "request 2" in history
+
+
+def test_tools_toggle_uses_only_latest_cached_evidence_in_order():
+    payload = _payload("incident-tools")
+    payload["evidence"] = [
+        {"tool_name": "inspect_port", "status": "failed", "duration_ms": 0,
+         "data": {"private": "sensitive-value"}},
+        {"tool_name": "inspect_port", "status": "success"},
+    ]
+    calls = []
+    responses = iter([json.dumps(payload), "null", "{bad",
+                      json.dumps({**payload, "evidence": []})])
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(stdout=next(responses), stderr="", returncode=0)
+
+    session = ChatSession("linux-admin", "/config", runner=runner)
+    assert "Chưa có" in session.handle("tools")
+    assert "tools" in session.handle("help")
+    report = session.handle("Check port 5432")
+    collapsed = "▶ Công cụ đã sử dụng (2) — nhập tools để mở"
+    assert collapsed in report
+    assert "sensitive-value" not in report
+    assert session.handle("tools").splitlines() == [
+        "▼ Công cụ đã sử dụng (2)", "  inspect_port — failed (0 ms)",
+        "  inspect_port — success",
+    ]
+    assert session.handle("tools") == collapsed
+    assert json.loads(session.handle("details")) == payload
+    session.handle("Giải thích rõ hơn kết quả vừa rồi")
+    assert len(calls) == 1
+    session.handle("Check port 8080")
+    session.handle("Check port 8080")
+    assert "▼ Công cụ đã sử dụng (2)" in session.handle("tools")
+    assert len(calls) == 3
+    assert "Công cụ đã sử dụng (0)" in session.handle("Check CPU")
+    assert "không ghi nhận" in session.handle("tools")
+    session.handle("clear")
+    assert "Chưa có" in session.handle("tools")
+    assert "Chưa có" in session.handle("details")
+    assert len(calls) == 4
