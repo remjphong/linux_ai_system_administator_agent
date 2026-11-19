@@ -3,7 +3,7 @@ set -u
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CLI="$ROOT/.venv/bin/linux-admin"
-CONFIG_DIR="${LINUX_ADMIN_CONFIG_DIR:-/tmp/linux-admin-v1-config}"
+CONFIG_DIR="${LINUX_ADMIN_CONFIG_DIR:-$ROOT/config}"
 
 if [[ ! -x "$CLI" ]]; then
     CLI="$(command -v linux-admin || true)"
@@ -21,45 +21,17 @@ if [[ ! -d "$CONFIG_DIR" ]]; then
     exit 1
 fi
 
+PYTHON="${CLI%/*}/python"
+if [[ ! -x "$PYTHON" ]]; then
+    PYTHON="$(command -v python3 || true)"
+fi
+if [[ -z "$PYTHON" || ! -x "$PYTHON" ]]; then
+    echo "Loi: Khong tim thay Python de chay giao dien chat."
+    exit 1
+fi
+
 export LLM_ENABLED="${LLM_ENABLED:-false}"
 export LLM_PLANNING_MODE="${LLM_PLANNING_MODE:-rules}"
 export TAVILY_ENABLED="${TAVILY_ENABLED:-false}"
 
-echo "=========================================="
-echo "       Linux AI Administrator"
-echo "=========================================="
-echo "Nhap yeu cau tu nhien de dieu tra."
-echo "Go exit de thoat."
-echo "Moi yeu cau se duoc xu ly trong mot luot rieng."
-echo
-
-while true; do
-    IFS= read -r -p "Ban > " request || {
-        echo
-        break
-    }
-
-    request="${request#"${request%%[![:space:]]*}"}"
-    request="${request%"${request##*[![:space:]]}"}"
-
-    [[ -z "$request" ]] && continue
-
-    case "${request,,}" in
-        exit|quit|thoat)
-            echo "Da thoat Linux AI Administrator."
-            break
-            ;;
-    esac
-
-    echo
-    echo "Agent > Dang tiep nhan yeu cau..."
-    "$CLI" \
-        --config-dir "$CONFIG_DIR" \
-        --investigate "$request"
-
-    result=$?
-    if (( result != 0 )); then
-        echo "Luot dieu tra ket thuc voi ma loi: $result"
-    fi
-    echo
-done
+exec "$PYTHON" -m linux_admin.chat --cli "$CLI" --config-dir "$CONFIG_DIR"
