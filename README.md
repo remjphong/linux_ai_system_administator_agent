@@ -66,6 +66,28 @@ Dashboard đạt smoke test khi bốn ô CPU, RAM, swap và đĩa hiển thị s
 
 Nếu muốn đối chiếu dữ liệu thô, mở `/api/snapshot` trên cùng địa chỉ. JSON gồm `timestamp`, `system`, `disk` và `processes`. Dừng dashboard bằng **Ctrl+C**. Server chỉ lắng nghe trên `127.0.0.1` của máy chạy Python.
 
+### Bật chat web với LLM và Tavily
+
+Trong `.env`, đặt `LLM_ENABLED=true`, `LLM_PLANNING_MODE=llm` và
+`TAVILY_ENABLED=true`. Giữ `LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL` và các key
+phù hợp với dịch vụ của bạn. Xem [cấu hình LLM và Tavily](docs/llm-and-tavily-setup.md).
+
+```bash
+python -m linux_admin.dashboard --port 8765 --chat --config-dir config
+```
+
+Chat web bật tổng hợp bằng LLM và chạy điều tra chỉ đọc. Mỗi lượt xử lý một câu
+hỏi độc lập. Tavily được dùng khi câu hỏi yêu cầu tra cứu. Ví dụ:
+
+- `Kiểm tra CPU và RAM hiện tại rồi tóm tắt kết quả.`
+- `Tra cứu trên web bằng Tavily tài liệu chính thức về Linux CPU iowait.`
+
+Giao diện hiển thị thời gian từ lúc gửi tới lúc nhận kết quả, thời gian backend,
+trạng thái từng tool và nguồn tham khảo. Để xác nhận cả hai tích hợp, kiểm tra
+model xuất hiện bên dưới bản tổng hợp và `tavily_web_search` có trạng thái
+`success` trong lượt tra cứu. Nếu dùng LLM cloud, câu hỏi và bằng chứng đã thu
+thập có thể được gửi tới nhà cung cấp. Giữ API key trong `.env`.
+
 ## 5. Chạy thử CLI và chat terminal
 
 Dùng terminal thứ hai nếu muốn giữ dashboard chạy. Kích hoạt lại `.venv` nếu vừa mở terminal mới.

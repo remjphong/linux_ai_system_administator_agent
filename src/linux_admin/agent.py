@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -22,6 +23,8 @@ from linux_admin.diagnostics import (
 )
 from linux_admin.llm_client import (
     AgentPlan,
+    FallbackLLMClient,
+    GroqLLMClient,
     LLMClient,
     OpenAICompatibleLLMClient,
     PlanStep,
@@ -876,13 +879,15 @@ class Agent:
         self.config = config
         self.audit = audit
         self._llm_client: LLMClient | None = None
+        self.summary_model: str | None = None
+        self._provider_chain: FallbackLLMClient | None = None
         self._fallback_planner: RuleBasedPlanner | None = None
 
         if planner is not None:
             # Explicitly injected planners remain available for tests/integrations.
             self.planner = planner
         elif config.llm.enabled and config.llm.planning_mode == "llm":
-            llm_client = OpenAICompatibleLLMClient(config.llm)
+            llm_client = self._make_llm_client()
             rule_planner = RuleBasedPlanner(config)
             self.planner = HybridPlanner(
                 config=config,
@@ -897,13 +902,33 @@ class Agent:
             rule_planner = RuleBasedPlanner(config)
             self.planner = rule_planner
             if config.llm.enabled and config.llm.summary_enabled:
-                self._llm_client = OpenAICompatibleLLMClient(config.llm)
+                self._llm_client = self._make_llm_client()
 
         if config.audit.enabled and audit is None:
             raise ValueError("An audit sink is required when audit.enabled is true")
 
+    def _make_llm_client(self) -> LLMClient:
+        settings = self.config.llm
+        local = OpenAICompatibleLLMClient(settings)
+        if not (settings.groq_api_key and settings.groq_model):
+            return local
+        groq = GroqLLMClient(replace(
+            settings,
+            model=settings.groq_model,
+            api_key=settings.groq_api_key,
+            api_key_env="GROQ_API_KEY",
+            base_url="https://api.groq.com",
+            timeout_seconds=min(settings.timeout_seconds, 8),
+            max_output_tokens=min(settings.max_output_tokens, 1024),
+        ))
+        self._provider_chain = FallbackLLMClient(groq, local)
+        return self._provider_chain
+
     def run(self, user_request: str) -> IncidentContext:
         """Investigate one request and return evidence plus an explicit final state."""
+        self.summary_model = None
+        if self._provider_chain is not None:
+            self._provider_chain.reset()
         context = IncidentContext(user_request=user_request.strip())
         context.status = "investigating"
 
@@ -1230,12 +1255,16 @@ class Agent:
                 summary = self._llm_client.summarize(
                     context.user_request, executed_plan, context.evidence
                 )
+                self.summary_model = (
+                    self._provider_chain.model
+                    if self._provider_chain is not None else self.config.llm.model
+                )
                 context.findings.append(f"LLM analysis: {summary}")
                 audit_ok = self._record_event(
                     "incident.llm_summary_completed",
                     context,
                     {
-                        "model": self.config.llm.model,
+                        "model": self.summary_model,
                         "summary_characters": len(summary),
                         "evidence_count": len(context.evidence),
                     },
@@ -1277,6 +1306,11 @@ class Agent:
                         "Audit failed while recording the LLM analysis failure."
                     )
 
+        if self._provider_chain is not None and self._provider_chain.used_fallback:
+            context.findings.append(
+                f"Groq failed ({self._provider_chain.primary_failure}). "
+                "Local LLM fallback was attempted."
+            )
         self._record_final(context)
         return context
 

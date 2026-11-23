@@ -192,6 +192,8 @@ def test_agent_uses_configured_llm_and_summarizes_evidence(
         base_url="https://llm.example/v1",
         fallback_to_rules=False,
         planning_mode="llm",
+        groq_api_key=None,
+        groq_model=None,
         summary_enabled=True,
     )
     llm_config = replace(app_config, llm=settings)
@@ -242,6 +244,8 @@ def test_agent_falls_back_to_rules_when_llm_planning_fails(
         base_url="https://llm.example/v1",
         fallback_to_rules=True,
         planning_mode="llm",
+        groq_api_key=None,
+        groq_model=None,
     )
     llm_config = replace(app_config, llm=settings)
 

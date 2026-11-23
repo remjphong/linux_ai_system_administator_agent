@@ -30,8 +30,4 @@ if [[ -z "$PYTHON" || ! -x "$PYTHON" ]]; then
     exit 1
 fi
 
-export LLM_ENABLED="${LLM_ENABLED:-false}"
-export LLM_PLANNING_MODE="${LLM_PLANNING_MODE:-rules}"
-export TAVILY_ENABLED="${TAVILY_ENABLED:-false}"
-
 exec "$PYTHON" -m linux_admin.chat --cli "$CLI" --config-dir "$CONFIG_DIR"

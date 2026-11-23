@@ -42,6 +42,8 @@ class LLMSettings:
     fallback_to_rules: bool = True
     planning_mode: str = "rules"
     summary_enabled: bool = False
+    groq_model: str | None = None
+    groq_api_key: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -334,7 +336,11 @@ def load_config(
     summary_enabled = _boolean(
         llm_section.get("summary_enabled", False), "llm.summary_enabled"
     )
+    groq_api_key = os.getenv("GROQ_API_KEY", "").strip() or None
+    groq_model = os.getenv("GROQ_MODEL", "").strip() or None
     if llm_enabled:
+        if groq_api_key and not groq_model:
+            raise ConfigurationError("Set GROQ_MODEL when GROQ_API_KEY is configured")
         if provider != "openai_compatible":
             raise ConfigurationError(
                 "LLM is enabled but llm.provider is unsupported; "
@@ -490,6 +496,8 @@ def load_config(
             fallback_to_rules=fallback_to_rules,
             planning_mode=planning_mode,
             summary_enabled=summary_enabled,
+            groq_model=groq_model,
+            groq_api_key=groq_api_key,
         ),
         tavily=TavilySettings(
             enabled=tavily_enabled,
