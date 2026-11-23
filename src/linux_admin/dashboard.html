@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="vi">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linux Admin Agent</title>
+<style>
+  :root { color-scheme: dark; font: 16px system-ui, sans-serif; }
+  body { margin: 0; background: #10151e; color: #e9eef7; }
+  main { max-width: 1000px; margin: auto; padding: 36px 20px; }
+  header { margin-bottom: 22px; }
+  h1 { margin: 0 0 8px; }
+  #status { color: #b5c6d9; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+  article, section { background: #1a2331; border: 1px solid #354459; border-radius: 12px; padding: 16px; }
+  strong { display: block; margin: 8px 0; font-size: 1.8rem; font-variant-numeric: tabular-nums; }
+  meter { width: 100%; accent-color: #72e0ba; }
+  section { margin-top: 16px; overflow-x: auto; }
+  h2 { margin-top: 0; font-size: 1.15rem; }
+  table { width: 100%; border-collapse: collapse; text-align: left; }
+  th, td { padding: 8px; border-bottom: 1px solid #354459; }
+  td:nth-child(n+3) { font-variant-numeric: tabular-nums; }
+  td:nth-child(2) { overflow-wrap: anywhere; }
+  #errors { color: #ffc7a2; overflow-wrap: anywhere; }
+</style>
+<main>
+  <header>
+    <h1>Linux Admin Agent</h1>
+    <div id="status" role="status">Đang chờ mẫu đầu tiên…</div>
+  </header>
+  <div class="metrics">
+    <article>CPU<strong id="cpu">—</strong><meter aria-label="CPU" id="cpu-bar" max="100" hidden></meter></article>
+    <article>RAM<strong id="ram">—</strong><meter aria-label="RAM" id="ram-bar" max="100" hidden></meter></article>
+    <article>Swap<strong id="swap">—</strong><meter aria-label="Swap" id="swap-bar" max="100" hidden></meter></article>
+    <article>Đĩa /<strong id="disk">—</strong><meter aria-label="Đĩa" id="disk-bar" max="100" hidden></meter></article>
+  </div>
+  <p id="errors" hidden></p>
+  <section>
+    <h2>Tiến trình dùng nhiều RAM</h2>
+    <table>
+      <thead><tr><th>PID</th><th>Tiến trình</th><th>RAM</th><th>RAM cư trú</th></tr></thead>
+      <tbody id="processes"></tbody>
+    </table>
+    <p id="empty">Đang chờ dữ liệu tiến trình.</p>
+  </section>
+</main>
+<script>
+  const byId = id => document.getElementById(id);
+  const percent = value => Number.isFinite(value) ? value.toFixed(1) + "%" : "—";
+  const mebibytes = value => Number.isFinite(value) ? (value / 1048576).toFixed(1) + " MiB" : "—";
+
+  function metric(id, value) {
+    byId(id).textContent = percent(value);
+    const bar = byId(id + "-bar");
+    bar.hidden = !Number.isFinite(value);
+    if (!bar.hidden) bar.value = value;
+  }
+
+  function render(snapshot) {
+    const results = [snapshot.system, snapshot.disk, snapshot.processes];
+    const [system, disk, processes] = results.map(
+      result => result.status === "success" ? result.data : {}
+    );
+    metric("cpu", system.cpu_percent);
+    metric("ram", system.memory_percent);
+    metric("swap", system.swap_percent);
+    metric("disk", disk.used_percent);
+
+    const errors = results.filter(result => result.status !== "success");
+    byId("errors").hidden = errors.length === 0;
+    byId("errors").textContent = errors.map(
+      result => result.tool_name + ": " + (result.error || result.status)
+    ).join(" · ");
+
+    const rows = (processes.processes || []).map(process => {
+      const row = document.createElement("tr");
+      for (const value of [process.pid, process.name, percent(process.memory_percent), mebibytes(process.rss_bytes)]) {
+        row.insertCell().textContent = value;
+      }
+      return row;
+    });
+    byId("processes").replaceChildren(...rows);
+    byId("empty").hidden = rows.length > 0;
+    byId("empty").textContent = snapshot.processes.status === "success"
+      ? "Không quan sát được tiến trình nào."
+      : "Chưa đọc được dữ liệu tiến trình.";
+    const time = new Date(snapshot.timestamp);
+    const state = Date.now() - time.getTime() > 15000 ? "Mẫu đã cũ" : "Đang cập nhật";
+    byId("status").textContent = state + " · Mẫu lúc " + time.toLocaleTimeString("vi-VN");
+  }
+
+  async function refresh() {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch("/api/snapshot", { signal: controller.signal });
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      render(await response.json());
+    } catch (error) {
+      byId("status").textContent = "Chưa nhận được mẫu mới. Đang thử lại…";
+    } finally {
+      clearTimeout(timeout);
+      setTimeout(refresh, 2000);
+    }
+  }
+  refresh();
+</script>
+</html>
