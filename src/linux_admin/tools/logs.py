@@ -105,7 +105,7 @@ class FailedServicesTool:
         completed, error = _run_linux_command(
             self.spec.name,
             "systemctl",
-            ["list-units", "--type=service", "--state=failed", "--no-legend", "--no-pager"],
+            ['list-units', '--type=service', '--state=failed', '--no-legend', '--no-pager', '--plain', '--full'],
         )
         if error is not None:
             return error

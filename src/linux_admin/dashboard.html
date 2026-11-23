@@ -4,23 +4,106 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Linux Admin Agent</title>
 <style>
-  :root { color-scheme: dark; font: 16px system-ui, sans-serif; }
-  body { margin: 0; background: #10151e; color: #e9eef7; }
-  main { max-width: 1000px; margin: auto; padding: 36px 20px; }
-  header { margin-bottom: 22px; }
-  h1 { margin: 0 0 8px; }
-  #status { color: #b5c6d9; }
-  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
-  article, section { background: #1a2331; border: 1px solid #354459; border-radius: 12px; padding: 16px; }
-  strong { display: block; margin: 8px 0; font-size: 1.8rem; font-variant-numeric: tabular-nums; }
-  meter { width: 100%; accent-color: #72e0ba; }
-  section { margin-top: 16px; overflow-x: auto; }
-  h2 { margin-top: 0; font-size: 1.15rem; }
+  :root {
+    color-scheme: dark;
+    font: 15px/1.55 system-ui, sans-serif;
+    --surface: #151e2d;
+    --line: #29374b;
+    --muted: #afbdd0;
+    --accent: #79e0c0;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: #0d1420; color: #edf2fa; }
+  main { max-width: 1240px; margin: auto; padding: 32px 24px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  h1 { margin: 0; font-size: clamp(1.4rem, 3vw, 2rem); letter-spacing: -.035em; }
+  h2 { margin: 0; font-size: 1rem; }
+  #status, #chat-state, .meta, #empty { color: var(--muted); font-size: .85rem; }
+  .metrics, .workspace { display: grid; gap: 14px; }
+  .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .workspace { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); margin-top: 18px; align-items: start; }
+  .metrics article, .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; }
+  .metrics article { padding: 14px 16px; color: var(--muted); }
+  strong { display: block; color: #edf2fa; font-size: 1.8rem; font-variant-numeric: tabular-nums; margin: 3px 0; }
+  meter { width: 100%; height: 8px; accent-color: var(--accent); }
+  .panel-head { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .panel-head p { margin: 4px 0 0; }
+  .table-scroll { overflow: auto; }
   table { width: 100%; border-collapse: collapse; text-align: left; }
-  th, td { padding: 8px; border-bottom: 1px solid #354459; }
-  td:nth-child(n+3) { font-variant-numeric: tabular-nums; }
+  th, td { padding: 9px 12px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-size: .82rem; white-space: nowrap; }
+  td:nth-child(n+3) { font-variant-numeric: tabular-nums; white-space: nowrap; }
   td:nth-child(2) { overflow-wrap: anywhere; }
+  #empty { padding: 0 16px; }
+  #chat-history { min-height: 210px; max-height: 52vh; overflow: auto; padding: 12px 16px; }
+  .turn { min-width: 0; margin: 0 0 14px; overflow-wrap: anywhere; }
+  .question, .answer { white-space: pre-wrap; border-radius: 12px; padding: 10px 12px; margin: 8px 0; }
+  .question { width: fit-content; max-width: 90%; margin-left: auto; background: #253c56; }
+  .answer { background: #1b293b; }
+  .meta { display: block; }
+  .turn details { border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; margin: 8px 0; color: var(--muted); }
+  summary { cursor: pointer; }
+  .turn pre { max-height: 220px; overflow: auto; background: #0d1420; padding: 8px; border-radius: 6px; }
+  .turn a { color: #9fd6ff; display: block; }
+  form { border-top: 1px solid var(--line); padding: 12px 16px; }
+  label { display: block; margin-bottom: 4px; color: var(--muted); font-size: .85rem; }
+  textarea { display: block; width: 100%; resize: vertical; padding: 9px 10px; background: #0d1420; border: 1px solid var(--line); border-radius: 8px; color: inherit; font: inherit; }
+  button { background: var(--accent); color: #0d231e; border: 0; border-radius: 8px; padding: 8px 14px; margin-top: 8px; font: inherit; font-weight: 650; cursor: pointer; }
+  button:disabled { opacity: .6; cursor: wait; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   #errors { color: #ffc7a2; overflow-wrap: anywhere; }
+  @media (max-width: 820px) { .workspace { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 520px) { main { padding: 20px 12px; } .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @property --fill { syntax: "<percentage>"; inherits: false; initial-value: 0%; }
+  @property --hue { syntax: "<number>"; inherits: false; initial-value: 145; }
+  .metrics article { text-align: center; }
+  .gauge { --fill: 0%; --hue: 145; display: grid; place-items: center; position: relative; isolation: isolate; margin: 4px auto 8px; width: min(112px, 100%); aspect-ratio: 1; border-radius: 50%; background: conic-gradient(hsl(var(--hue) 95% 52%) var(--fill), var(--line) 0); transition: --fill .55s ease, --hue .55s ease; }
+  .gauge::before { content: ""; position: absolute; inset: 7px; background: var(--surface); border-radius: 50%; z-index: -1; }
+  .gauge strong { font-size: clamp(1.1rem, 3vw, 1.6rem); }
+  .demo-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .demo-grid > div { padding: 14px 16px; min-width: 0; }
+  .demo-grid > div + div { border-left: 1px solid var(--line); }
+  .demo-grid select { font: inherit; padding: 8px; max-width: 100%; background: #0d1420; color: inherit; border: 1px solid var(--line); border-radius: 8px; }
+  @media (max-width: 650px) { .demo-grid { grid-template-columns: 1fr; } .demo-grid > div + div { border-left: 0; border-top: 1px solid var(--line); } }
+  @media (prefers-reduced-motion: reduce) { .gauge { transition: none; } }
+  .recovery-controls { display: flex; align-items: flex-start; flex-wrap: wrap; column-gap: 10px; }
+  .recovery-plan { min-width: 0; max-width: 100%; margin-top: 8px; }
+  .recovery-plan summary { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); }
+  .recovery-plan li { overflow-wrap: anywhere; }
+  #demo-category { width: fit-content; padding: 2px 9px; border: 1px solid var(--line); border-radius: 20px; color: var(--accent); font-size: .85rem; }
+  .ui-icon { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+  .panel-head h2 { display: flex; align-items: center; gap: 9px; }
+  .panel-head .ui-icon { color: var(--accent); }
+  #monitor-state:empty, #demo-status:empty { display: none; }
+  .incident-list { max-height: 310px; overflow: auto; }
+  .incident-list details + details { border-top: 1px solid var(--line); }
+  .incident-list summary { display: flex; align-items: center; gap: 14px; padding: 9px 16px; font-size: .87rem; list-style: none; }
+  .incident-list summary::-webkit-details-marker { display: none; }
+  .incident-list summary::after { content: "›"; color: var(--muted); font-size: 1.14rem; }
+  .incident-list details[open] summary::after { transform: rotate(90deg); }
+  .incident-list summary:hover { background: #1b293b; }
+  .incident-id { color: var(--muted); min-width: 27px; }
+  .incident-subject { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .incident-type, .incident-state, .incident-evidence { color: var(--muted); }
+  .incident-state { white-space: nowrap; }
+  .incident-state::before { content: "●"; color: #69c9a7; margin-right: 6px; font-size: .65em; }
+  .incident-state.active::before { color: #ffab72; }
+  .incident-evidence { padding: 1px 16px 12px; font-size: .85rem; overflow-wrap: anywhere; }
+  .incident-evidence p { margin: 4px 0; }
+  .demo-flow { display: flex; flex-wrap: wrap; gap: 12px; list-style: none; padding: 0; margin: 0 0 12px; color: var(--muted); font-size: .85rem; }
+  .demo-flow li { display: flex; align-items: center; gap: 5px; }
+  .demo-flow li + li::before { content: "›"; margin-right: 5px; }
+  .demo-flow .ui-icon { width: 15px; height: 15px; }
+  .demo-flow[data-state="detected"] li:first-child, .demo-flow[data-state="recovering"] li:nth-child(2), .demo-flow[data-state="verified"] li:last-child { color: var(--accent); font-weight: 650; }
+  #chat-empty { min-height: 155px; display: grid; place-content: center; justify-items: center; color: var(--muted); }
+  #chat-empty .ui-icon { width: 30px; height: 30px; color: var(--accent); }
+  #chat-empty p { margin: 8px 0 2px; }
+  #chat-example { color: inherit; background: transparent; border: 1px solid var(--line); font-size: .82rem; }
+  #chat-form button { display: inline-flex; align-items: center; gap: 7px; }
+  #processes td { padding-block: 7px; font-size: .86rem; }
+  #processes meter { display: block; min-width: 44px; margin-top: 2px; height: 5px; }
+  @media (max-width: 520px) { .incident-list summary { flex-wrap: wrap; gap: 5px 9px; } .incident-subject { flex-basis: 66%; } }
 </style>
 <main>
   <header>
@@ -28,20 +111,81 @@
     <div id="status" role="status">Đang chờ mẫu đầu tiên…</div>
   </header>
   <div class="metrics">
-    <article>CPU<strong id="cpu">—</strong><meter aria-label="CPU" id="cpu-bar" max="100" hidden></meter></article>
-    <article>RAM<strong id="ram">—</strong><meter aria-label="RAM" id="ram-bar" max="100" hidden></meter></article>
-    <article>Swap<strong id="swap">—</strong><meter aria-label="Swap" id="swap-bar" max="100" hidden></meter></article>
-    <article>Đĩa /<strong id="disk">—</strong><meter aria-label="Đĩa" id="disk-bar" max="100" hidden></meter></article>
+    <article><div class="gauge" id="cpu-gauge"><strong id="cpu">—</strong></div><div>CPU</div></article>
+    <article><div class="gauge" id="ram-gauge"><strong id="ram">—</strong></div><div>RAM</div></article>
+    <article><div class="gauge" id="swap-gauge"><strong id="swap">—</strong></div><div>Swap</div></article>
+    <article><div class="gauge" id="disk-gauge"><strong id="disk">—</strong></div><div>Đĩa /</div></article>
   </div>
   <p id="errors" hidden></p>
-  <section>
-    <h2>Tiến trình dùng nhiều RAM</h2>
-    <table>
-      <thead><tr><th>PID</th><th>Tiến trình</th><th>RAM</th><th>RAM cư trú</th></tr></thead>
-      <tbody id="processes"></tbody>
-    </table>
-    <p id="empty">Đang chờ dữ liệu tiến trình.</p>
+  <section class="panel" id="monitor-panel" hidden style="margin-top: 16px">
+    <div class="panel-head">
+      <h2><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12h5l3-7 4 14 3-7h5"/></svg>Sự cố giám sát</h2>
+      <p id="monitor-state" role="status"></p>
+    </div>
+    <div id="incidents" class="incident-list"></div>
   </section>
+  <section class="panel" style="margin-top: 16px" aria-labelledby="demo-title">
+    <div class="panel-head">
+      <h2 id="demo-title"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6m-5 0v7l-5 8a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-8V3M8 15h8"/></svg>Mô phỏng sự cố</h2>
+      <p class="meta">Tạo lỗi trên dịch vụ HTTP thử nghiệm chỉ lắng nghe loopback.</p>
+    </div>
+    <div class="demo-grid">
+      <div>
+
+        <label for="demo-kind">Loại sự cố</label>
+        <select id="demo-kind">
+          <option value="service_exit">Dịch vụ ngừng lắng nghe</option>
+          <option value="service_unready">Dịch vụ trả HTTP 503</option>
+        </select>
+        <button id="demo-trigger" type="button" disabled>Tạo sự cố</button>
+        <p id="demo-observed">Đang tải trạng thái…</p>
+      </div>
+      <div>
+        <ol id="demo-flow" class="demo-flow" aria-label="Tiến độ xử lý">
+          <li><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12h5l3-7 4 14 3-7h5"/></svg>Phát hiện</li><li><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 6a5 5 0 0 0-6 6l-5 5 4 4 5-5a5 5 0 0 0 6-6l-3 3-4-4 3-3Z"/></svg>Khắc phục</li><li><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>Xác minh</li>
+        </ol>
+        <p id="demo-category" hidden></p>
+        <p id="demo-proposal" hidden></p>
+        <div class="recovery-controls">
+          <button id="demo-recover" type="button" hidden>Xác nhận khắc phục</button>
+          <details id="demo-plan" class="recovery-plan" hidden>
+            <summary>Công cụ và các bước</summary>
+            <ol id="demo-steps"></ol>
+          </details>
+        </div>
+        <p id="demo-status" role="status"></p>
+      </div>
+    </div>
+  </section>
+  <div class="workspace">
+    <section class="panel" aria-labelledby="chat-title">
+      <div class="panel-head">
+        <h2 id="chat-title"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a7 7 0 0 1-7 7H8l-4 3v-6a7 7 0 0 1 6-11h3a7 7 0 0 1 7 7ZM8 10h8m-8 4h5"/></svg>Chat chẩn đoán</h2>
+        <p id="chat-state" role="status">Đang kết nối…</p>
+      </div>
+      <div id="chat-history" aria-live="polite">
+        <div id="chat-empty"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a7 7 0 0 1-7 7H8l-4 3v-6a7 7 0 0 1 6-11h3a7 7 0 0 1 7 7ZM8 10h8m-8 4h5"/></svg><p>Máy đang gặp vấn đề gì?</p>
+          <button type="button" id="chat-example" hidden>Kiểm tra CPU và RAM</button>
+        </div>
+      </div>
+      <form id="chat-form" hidden>
+        <label for="message">Câu hỏi</label>
+        <textarea id="message" rows="2" maxlength="1500" required
+                  placeholder="Ví dụ: Kiểm tra tải CPU và RAM"></textarea>
+        <button type="submit"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 4 18 8-18 8 3-8-3-8Zm3 8h15"/></svg><span>Gửi</span></button>
+      </form>
+    </section>
+    <section class="panel" aria-labelledby="process-title">
+      <div class="panel-head"><h2 id="process-title"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM9 8h6m-6 4h6m-6 4h3"/></svg>Tiến trình dùng nhiều RAM</h2></div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>PID</th><th>Tiến trình</th><th>RAM</th><th>RAM cư trú</th></tr></thead>
+          <tbody id="processes"></tbody>
+        </table>
+      </div>
+      <p id="empty">Đang chờ dữ liệu tiến trình.</p>
+    </section>
+  </div>
 </main>
 <script>
   const byId = id => document.getElementById(id);
@@ -50,9 +194,10 @@
 
   function metric(id, value) {
     byId(id).textContent = percent(value);
-    const bar = byId(id + "-bar");
-    bar.hidden = !Number.isFinite(value);
-    if (!bar.hidden) bar.value = value;
+    const gauge = byId(id + "-gauge");
+    const fill = Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
+    gauge.style.setProperty("--fill", fill + "%");
+    gauge.style.setProperty("--hue", 145 * (1 - fill / 100));
   }
 
   function render(snapshot) {
@@ -76,6 +221,11 @@
       for (const value of [process.pid, process.name, percent(process.memory_percent), mebibytes(process.rss_bytes)]) {
         row.insertCell().textContent = value;
       }
+      const bar = document.createElement("meter");
+      bar.max = 100;
+      bar.value = process.memory_percent;
+      bar.setAttribute("aria-hidden", "true");
+      row.cells[2].append(bar);
       return row;
     });
     byId("processes").replaceChildren(...rows);
@@ -83,6 +233,36 @@
     byId("empty").textContent = snapshot.processes.status === "success"
       ? "Không quan sát được tiến trình nào."
       : "Chưa đọc được dữ liệu tiến trình.";
+    if (snapshot.incidents || snapshot.monitor_errors) {
+      byId("monitor-panel").hidden = false;
+      const incidents = snapshot.incidents || [];
+      const list = byId("incidents");
+      const signature = JSON.stringify(incidents);
+      if (list.dataset.signature !== signature) {
+        const expanded = new Set([...list.querySelectorAll("details[open]")].map(row => row.dataset.id));
+        list.replaceChildren(...incidents.map(incident => {
+          const row = document.createElement("details");
+          row.dataset.id = String(incident.id);
+          row.open = expanded.has(row.dataset.id);
+          const line = addText(row, "summary", "");
+          addText(line, "span", "#" + incident.id).className = "incident-id";
+          addText(line, "span", incident.subject).className = "incident-subject";
+          addText(line, "span", incidentCategory(incident.category)).className = "incident-type";
+          addText(line, "span", incident.cleared_at ? "Tín hiệu đã hết" : "Đang mở")
+            .className = incident.cleared_at ? "incident-state" : "incident-state active";
+          const body = addText(row, "div", "");
+          body.className = "incident-evidence";
+          addText(body, "p", incident.evidence);
+          addText(body, "time", "Phát hiện " + new Date(incident.opened_at).toLocaleString("vi-VN"));
+          return row;
+        }));
+        list.dataset.signature = signature;
+      }
+      const errors = snapshot.monitor_errors || [];
+      byId("monitor-state").textContent = errors.length
+        ? "Thiếu dữ liệu: " + errors.join(", ")
+        : incidents.length ? "" : "Chưa ghi nhận sự cố.";
+    }
     const time = new Date(snapshot.timestamp);
     const state = Date.now() - time.getTime() > 15000 ? "Mẫu đã cũ" : "Đang cập nhật";
     byId("status").textContent = state + " · Mẫu lúc " + time.toLocaleTimeString("vi-VN");
@@ -102,6 +282,173 @@
       setTimeout(refresh, 2000);
     }
   }
+  const form = byId("chat-form");
+  const chatState = byId("chat-state");
+
+  async function loadChatStatus() {
+    try {
+      const response = await fetch("/api/chat-status");
+      const config = await response.json();
+      form.hidden = !config.enabled;
+      byId("chat-example").hidden = !config.enabled;
+      chatState.textContent = config.enabled
+        ? "Mỗi câu hỏi là một lượt điều tra riêng. Nêu rõ nếu muốn tra cứu Tavily."
+        : "Khởi động dashboard bằng --chat để bật LLM và Tavily.";
+    } catch {
+      chatState.textContent = "Chưa kiểm tra được trạng thái chat.";
+    }
+  }
+
+  function addText(parent, tag, text) {
+    const node = document.createElement(tag);
+    node.textContent = text;
+    parent.append(node);
+    return node;
+  }
+
+  byId("chat-example").addEventListener("click", () => {
+    const input = byId("message");
+    input.value = "Kiểm tra CPU và RAM";
+    input.focus();
+  });
+
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    const input = byId("message");
+    const question = input.value.trim();
+    if (!question) return;
+    const button = form.querySelector("button");
+    if (button.disabled) return;
+    button.disabled = true;
+    input.value = "";
+    button.querySelector("span").textContent = "Đang gửi…";
+    byId("chat-empty").hidden = true;
+    chatState.textContent = "Đang điều tra…";
+    const started = performance.now();
+    const turn = document.createElement("article");
+    turn.className = "turn";
+    addText(turn, "p", question).className = "question";
+    const answer = addText(turn, "p", "Đang thu thập dữ liệu…");
+    answer.className = "answer";
+    const history = byId("chat-history");
+    history.append(turn);
+    history.scrollTop = history.scrollHeight;
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: question })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Yêu cầu thất bại.");
+      const wall = ((performance.now() - started) / 1000).toFixed(2);
+      const backend = (data.elapsed_ms / 1000).toFixed(2);
+      answer.textContent = data.answer;
+      addText(turn, "small", `${wall} giây · ${data.model || "Kết quả kiểm tra"}`).className = "meta";
+      const details = document.createElement("details");
+      addText(details, "summary", "Chi tiết kiểm tra");
+      addText(details, "p", `Backend ${backend}s · ${data.status}`);
+      for (const tool of data.tools) {
+        const timing = tool.ms == null ? "" : ` · ${tool.ms} ms`;
+        const toolDetails = document.createElement("details");
+        addText(toolDetails, "summary", `${tool.name} · ${tool.status}${timing}`);
+        addText(toolDetails, "pre", JSON.stringify(tool.error || tool.result, null, 2));
+        details.append(toolDetails);
+      }
+      for (const finding of data.findings) addText(details, "p", finding);
+      turn.append(details);
+      for (const source of data.references) {
+        try {
+          const url = new URL(source.url);
+          if (!["https:", "http:"].includes(url.protocol)) continue;
+          const link = document.createElement("a");
+          link.href = url.href;
+          link.textContent = source.title || url.hostname;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          turn.append(link);
+        } catch { continue; }
+      }
+      chatState.textContent = "Đã nhận kết quả.";
+    } catch (error) {
+      answer.textContent = error.message;
+      if (!input.value) input.value = question;
+      chatState.textContent = "Lượt điều tra chưa hoàn tất.";
+    } finally {
+      button.querySelector("span").textContent = "Gửi";
+      button.disabled = false;
+    }
+  });
+
+  function incidentCategory(category) {
+    switch (category) {
+      case "system": return "Hệ thống";
+      case "network": return "Mạng";
+      case "security": return "Bảo mật";
+      default: return "Chưa phân loại";
+    }
+  }
+
+  const demoTrigger = byId("demo-trigger");
+  const demoRecover = byId("demo-recover");
+  const demoStatus = byId("demo-status");
+
+  function renderDemo(incident) {
+    const detected = incident?.state === "detected";
+    byId("demo-observed").textContent = detected
+      ? incident.title + " · " + incident.evidence : "Không có sự cố mô phỏng đang mở.";
+    byId("demo-proposal").hidden = !detected;
+    byId("demo-proposal").textContent = detected ? incident.proposal : "";
+    byId("demo-flow").dataset.state = incident?.state || "idle";
+    const category = byId("demo-category");
+    category.hidden = !detected;
+    category.textContent = detected ? incidentCategory(incident.category) : "";
+    const plan = byId("demo-plan");
+    plan.hidden = !detected;
+    plan.open = false;
+    byId("demo-steps").replaceChildren(...(detected ? incident.steps : []).map(step => {
+      const item = document.createElement("li");
+      item.textContent = step.kind + ": " + step.name + (step.target ? " · " + step.target : "");
+      return item;
+    }));
+    demoRecover.hidden = !detected;
+    demoTrigger.disabled = detected;
+    demoStatus.textContent = incident?.state === "verified"
+      ? "Dịch vụ thử nghiệm đã ổn định trở lại · " + incident.evidence : "";
+  }
+
+  async function updateDemo(action, payload) {
+    demoTrigger.disabled = true;
+    demoRecover.disabled = true;
+    if (action === "recover") byId("demo-flow").dataset.state = "recovering";
+    demoStatus.textContent = action === "recover" ? "Đang khắc phục và xác minh…" : "Đang tạo sự cố…";
+    try {
+      const response = await fetch("/api/demo/" + action, {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error);
+      renderDemo(result);
+    } catch (error) {
+      demoTrigger.disabled = !demoRecover.hidden;
+      byId("demo-flow").dataset.state = demoRecover.hidden ? "idle" : "detected";
+      demoStatus.textContent = error.message;
+    } finally {
+      demoRecover.disabled = false;
+    }
+  }
+
+  demoTrigger.addEventListener("click", () => updateDemo("trigger", {scenario: byId("demo-kind").value}));
+  demoRecover.addEventListener("click", () => updateDemo("recover", {}));
+  fetch("/api/demo").then(response => {
+    if (!response.ok) throw new Error("Không đọc được trạng thái demo.");
+    return response.json();
+  }).then(data => renderDemo(data.incident)).catch(error => {
+    byId("demo-observed").textContent = error.message;
+  });
+
+  loadChatStatus();
   refresh();
 </script>
 </html>
