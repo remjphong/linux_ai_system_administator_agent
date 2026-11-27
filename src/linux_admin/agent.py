@@ -186,6 +186,11 @@ class RuleBasedPlanner:
              "logins", "brute force", "failed password", "authentication",
              "dang nhap", "xac thuc"),
         )
+        patch_issue = self._contains_any(
+            request, ("ban va", "security updates", "security patch", "usn", "lo hong")
+        )
+        if patch_issue:
+            add("check_security_updates", {}, "Check published Ubuntu security patches")
         match = re.search(r"\b(?:port|cong)\s*[:#-]?\s*(\d{1,5})\b", request)
         explicit_port = int(match.group(1)) if match else None
         if explicit_port is not None and not 1 <= explicit_port <= 65535:
@@ -206,11 +211,16 @@ class RuleBasedPlanner:
                                    "priority": "err"},
                 "Inspect bounded kernel error and OOM evidence")
         if auth_issue:
-            add("check_auth_log", {"lines": 100, "since_minutes": 60,
-                                   "brute_force_threshold": 10},
-                "Inspect bounded authentication-anomaly counts")
+            settings = self._config.security
+            args = (
+                {"lines": 200, "since_minutes": settings.window_minutes,
+                 "brute_force_threshold": settings.failure_threshold}
+                if settings.monitor_ssh else
+                {"lines": 100, "since_minutes": 60, "brute_force_threshold": 10}
+            )
+            add("check_auth_log", args, "Inspect bounded authentication-anomaly counts")
         specialized_issue = any((mount_issue, io_issue, listener_issue,
-                                 kernel_issue, auth_issue))
+                                 kernel_issue, auth_issue, patch_issue))
 
         # Probe the user-supplied endpoint only; never invent localhost targets.
         if url:
@@ -1559,6 +1569,14 @@ class Agent:
         if not result.ok:
             error = result.error or "no error details"
             return f"{result.tool_name}: {result.status} ({error})."
+
+        if result.tool_name == "check_security_updates":
+            messages = {
+                "missing": "Thiếu bản vá Ubuntu.",
+                "clear": "Không tìm thấy bản vá thiếu trong phạm vi quét.",
+                "inconclusive": "Chưa đủ dữ liệu để kết luận về bản vá Ubuntu.",
+            }
+            return messages[result.data["assessment"]]
 
         if result.tool_name == "get_service_status":
             data = result.data

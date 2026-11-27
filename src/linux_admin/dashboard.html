@@ -20,11 +20,7 @@
   h1 { margin: 0; font-size: clamp(1.4rem, 3vw, 2rem); letter-spacing: -.035em; }
   h2 { margin: 0; font-size: 1rem; }
   #status, #chat-state, .meta, #empty { color: var(--muted); font-size: .85rem; }
-  .metrics, .workspace { display: grid; gap: 14px; }
-  .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .workspace { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); margin-top: 18px; align-items: start; }
-  .metrics article, .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; }
-  .metrics article { padding: 14px 16px; color: var(--muted); }
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; }
   strong { display: block; color: #edf2fa; font-size: 1.8rem; font-variant-numeric: tabular-nums; margin: 3px 0; }
   meter { width: 100%; height: 8px; accent-color: var(--accent); }
   .panel-head { padding: 14px 16px; border-bottom: 1px solid var(--line); }
@@ -53,12 +49,8 @@
   button:disabled { opacity: .6; cursor: wait; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   #errors { color: #ffc7a2; overflow-wrap: anywhere; }
-  @media (max-width: 820px) { .workspace { grid-template-columns: minmax(0, 1fr); } }
-  @media (max-width: 520px) { main { padding: 20px 12px; } .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @property --fill { syntax: "<percentage>"; inherits: false; initial-value: 0%; }
-  @property --hue { syntax: "<number>"; inherits: false; initial-value: 145; }
-  .metrics article { text-align: center; }
-  .gauge { --fill: 0%; --hue: 145; display: grid; place-items: center; position: relative; isolation: isolate; margin: 4px auto 8px; width: min(112px, 100%); aspect-ratio: 1; border-radius: 50%; background: conic-gradient(hsl(var(--hue) 95% 52%) var(--fill), var(--line) 0); transition: --fill .55s ease, --hue .55s ease; }
+  .gauge { --fill: 0%; display: grid; place-items: center; position: relative; isolation: isolate; aspect-ratio: 1; border-radius: 50%; transition: --fill .55s ease; }
   .gauge::before { content: ""; position: absolute; inset: 7px; background: var(--surface); border-radius: 50%; z-index: -1; }
   .gauge strong { font-size: clamp(1.1rem, 3vw, 1.6rem); }
   .demo-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -104,27 +96,407 @@
   #processes td { padding-block: 7px; font-size: .86rem; }
   #processes meter { display: block; min-width: 44px; margin-top: 2px; height: 5px; }
   @media (max-width: 520px) { .incident-list summary { flex-wrap: wrap; gap: 5px 9px; } .incident-subject { flex-basis: 66%; } }
+  .security-panel { margin-top: 16px; overflow: hidden; }
+  .security-panel .ui-icon, .package-dialog .ui-icon { width: 16px; height: 16px; flex-shrink: 0; }
+  .security-panel h2, .security-panel h3 { display: flex; align-items: center; gap: 8px; }
+  .security-panel h2 .ui-icon { color: var(--accent); }
+  .security-tools { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); gap: 12px; padding: 14px 16px; }
+  .security-tools > div { min-width: 0; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+  .security-tools h3 { font-size: .92rem; margin: 0 0 10px; }
+  .security-tools h3 .ui-icon { color: var(--muted); }
+  .security-tools form, .security-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; }
+  .security-tools form { border: 0; padding: 0; }
+  .security-tools label, .patch-filters label { display: grid; gap: 4px; margin: 0; font-size: .78rem; color: var(--muted); }
+  .security-tools label { flex: 1 1 8rem; min-width: 0; }
+  .security-panel input, .security-panel select {
+    width: 100%; min-width: 0; min-height: 34px; padding: 6px 10px; border: 1px solid var(--line);
+    border-radius: 9px; font: inherit; font-size: .85rem; color: inherit; background: #101928;
+  }
+  .security-panel input::placeholder { color: #8797ad; }
+  .security-panel select { cursor: pointer; }
+  .security-panel :is(input, select):focus-visible { outline-offset: 1px; }
+  .security-panel .security-action {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    min-height: 34px; border-radius: 9px; padding: 6px 10px; margin: 0; font-size: .82rem;
+  }
+  .security-panel .security-action--icon { width: 34px; padding: 0; color: var(--accent);
+    border: 1px solid var(--line); background: #182638; }
+  .security-panel button:not(:disabled):hover { filter: brightness(1.14); }
+  .security-note { color: var(--muted); font-size: .84rem; margin: 7px 0 0; }
+  .security-note:empty { display: none; }
+  .security-results { padding: 0 16px 14px; }
+  .security-results a { color: var(--accent); }
+  .security-results code { overflow-wrap: anywhere; }
+  .security-results details { margin-top: 12px; }
+  .security-results summary { cursor: pointer; }
+  .security-findings { max-height: 400px; border: 1px solid var(--line); border-radius: 11px; }
+  .security-findings table { table-layout: fixed; min-width: 670px; }
+  .security-findings th { position: sticky; top: 0; z-index: 1; background: #182334; }
+  .security-findings :is(th, td) { padding: 8px 9px; overflow-wrap: anywhere; white-space: normal; font-size: .82rem; }
+  .security-findings tbody tr:hover { background: #192638; }
+  .security-findings tbody tr:last-child td { border-bottom: 0; }
+  .security-findings th:nth-child(1) { width: 21%; }
+  .security-findings th:nth-child(2) { width: 9%; }
+  .security-findings th:nth-child(3) { width: 13%; }
+  .security-findings th:nth-child(4), .security-findings th:nth-child(5) { width: 15%; }
+  .security-findings th:nth-child(7) { width: 44px; }
+  @media (max-width: 730px) { .security-tools { grid-template-columns: 1fr; } }
+  .package-link {
+    color: var(--accent); background: transparent; text-align: left;
+    margin: 0; padding: 0; text-decoration: underline; text-underline-offset: .22em;
+  }
+  .package-dialog {
+    background: var(--surface); color: #edf2fa; border: 1px solid var(--line);
+    border-radius: 14px; padding: 0; width: min(620px, calc(100vw - 28px));
+    max-height: min(78vh, 700px); overflow: auto; overflow-wrap: anywhere;
+  }
+  .package-dialog::backdrop { background: rgb(5 10 18 / 75%); }
+  .package-dialog-head {
+    display: flex; gap: 12px; align-items: center; justify-content: space-between;
+    position: sticky; top: 0; background: var(--surface); z-index: 1;
+  }
+  .package-dialog-head form { margin: 0; padding: 0; border: 0; }
+  .package-dialog-head button { display: grid; place-items: center; margin: 0; width: 34px; height: 34px;
+    padding: 0; border-radius: 9px; color: inherit; background: #233146; }
+  .package-dialog-body { padding: 14px 16px; }
+  .package-dialog-body h3 { font-size: .95rem; margin: 14px 0 4px; }
+  .package-dialog-body p { margin: 4px 0; }
+  .package-dialog-body ul { margin: 8px 0 0; padding-left: 20px; }
+  .patch-toolbar { display: flex; align-items: end; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin: 0 0 10px; }
+  .patch-switch { display: inline-flex; flex-wrap: wrap; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 10px; background: #101928; }
+  .patch-switch button { color: var(--muted); background: transparent; }
+  .patch-switch button[aria-pressed="true"] { color: var(--accent); background: #203747; }
+  .patch-filters { display: flex; flex: 1 1 345px; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+  .patch-filters label { flex: 0 1 125px; }
+  .patch-filters .patch-search-field { flex: 1 1 140px; max-width: 210px; }
+  @media (max-width: 520px) {
+    .patch-filters { justify-content: start; }
+    .patch-filters label { flex: 1 1 100px; }
+    .patch-filters .patch-search-field { max-width: none; flex: 1 1 100%; }
+  }
+  .patch-kind { display: inline-block; padding: 2px 6px; border: 1px solid var(--line); border-radius: 7px; }
+  .patch-title { display: block; margin-bottom: 4px; }
+  .patch-summary { display: block; color: var(--muted); max-width: 26ch; margin-top: 3px; }
+  .patch-count { margin-top: 8px; display: flex; align-items: center; gap: 12px; }
+  .patch-count button { margin-top: 0; }
+  body {
+    --surface: #101e31; --line: #253c58; --accent: #80e0ee; --muted: #9eafc5;
+    background: radial-gradient(ellipse at 50% -10%, #182e4d, transparent 58%), #08121f;
+  }
+  .cockpit {
+    display: grid; gap: 12px; width: min(100%, 1550px); max-width: none;
+    padding: 18px clamp(12px, 3.25vw, 46px);
+  }
+  .cockpit > header { grid-row: 1; margin: 0; align-items: center; }
+  .cockpit h1 { display: flex; align-items: center; gap: 9px; font-size: clamp(1.15rem, 2vw, 1.55rem); letter-spacing: -.03em; }
+  .cockpit h1 svg { width: 22px; height: 22px; color: var(--accent); }
+  .cockpit > #errors { grid-row: 5; margin: 0; font-size: .82rem; }
+  #status { display: flex; gap: 8px; align-items: center; font-variant-numeric: tabular-nums; }
+  #status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #72839d; }
+  [data-feed="live"] #status::before { background: #78e2b4; box-shadow: 0 0 10px #78e2b480; }
+  [data-feed="stale"] #status::before { background: #f6b975; }
+
+  .live-dock {
+    justify-self: center; position: relative; isolation: isolate; min-width: 0;
+    border-color: #365572; overflow: hidden; border-radius: 15px;
+    background: linear-gradient(110deg, #14273b, #112034 64%, #142842);
+    box-shadow: 0 10px 24px #030a1580, inset 0 1px #89caf821;
+  }
+  .live-dock::before {
+    content: ""; position: absolute; z-index: -1; inset: 0 auto 0 0; width: 26%;
+    pointer-events: none; opacity: 0; background: linear-gradient(90deg, transparent, #76dafa21, transparent);
+  }
+  .live-dock.sample-motion::before { animation: dock-sweep 1.25s ease-out; }
+  @keyframes dock-sweep { from { transform: translateX(-100%); opacity: 0; }
+    20%, 70% { opacity: 1; } to { transform: translateX(400%); opacity: 0; } }
+  .live-dock .panel-head { display: flex; align-items: center; gap: 7px 11px; flex-wrap: wrap;
+    padding: 9px 14px; border-bottom-color: #36557291; }
+  .live-dock .panel-head h2 { display: inline-flex; align-items: center; gap: 7px; font-size: .94rem; }
+  .live-dock .panel-head p { margin: 0; color: var(--muted); font-size: .81rem; overflow-wrap: anywhere; }
+  .dock-count { margin-left: auto; padding: 2px 8px; border: 1px solid #3b566e; border-radius: 999px;
+    color: #bed5eb; font-size: .75rem; white-space: nowrap; }
+  .incident-dock { grid-row: 2; width: min(100%, 850px); border-color: #326456; }
+  .incident-dock[data-open="true"] { border-color: #a47350; }
+  .incident-dock[data-open="true"] .dock-count { color: #ffd3a9; border-color: #946a4d; }
+  .incident-dock .incident-list { max-height: 92px; overscroll-behavior: contain; }
+  .incident-dock .incident-list:empty { display: none; }
+  .incident-dock .incident-list summary { padding: 6px 14px; }
+  .process-dock { grid-row: 4; width: min(100%, 1100px); }
+  .process-dock .table-scroll { max-height: 130px; overscroll-behavior: contain; scrollbar-width: thin; }
+  .process-dock th { position: sticky; top: 0; z-index: 1; background: #142539; }
+  .process-dock :is(th, td) { padding: 4px 12px; white-space: normal; }
+  .process-dock td:nth-child(2) { width: 50%; }
+  .process-dock #empty { margin: 5px 0 9px; }
+  .process-dock #processes meter { height: 3px; max-width: 96px; margin-top: 1px; }
+
+  .operations-stage {
+    grid-row: 3; min-height: 0; min-width: 0; display: grid; gap: clamp(10px, 2vw, 27px);
+    grid-template-columns: minmax(86px, .18fr) minmax(0, 1fr) minmax(86px, .18fr);
+    grid-template-areas: "left workspace right"; align-items: stretch;
+  }
+  .rail-left { grid-area: left; }
+  .rail-right { grid-area: right; }
+  .instrument-rail { display: grid; align-content: space-evenly; justify-items: center; gap: 16px; padding-block: 31px 7px; }
+  .instrument { width: min(100%, 146px); }
+  .instrument .gauge {
+    width: 100%; margin: 0; color: #82e3f2; border: 1px solid #355775;
+    background: conic-gradient(from 210deg,
+      #68dfa9 var(--fill), #294359 var(--fill) 76%, transparent 76%);
+    box-shadow: 0 0 20px #4aafed16, inset 0 0 0 4px #142c43;
+  }
+  .instrument .gauge::before {
+    inset: 6px; background: radial-gradient(circle at 48% 80%, #1a334a, #102033 65%);
+    border: 1px solid #42628270;
+  }
+  .instrument .gauge::after {
+    content: ""; position: absolute; inset: 10px; border-radius: 50%; z-index: -1;
+    background: conic-gradient(from -65deg, transparent 85%, #78d8f64d 98%, #98edfdad 100%);
+    mask: radial-gradient(circle, transparent 62%, #000 64%, #000 68%, transparent 70%);
+    opacity: 0; pointer-events: none;
+  }
+  .instrument .gauge.sample-motion::after { animation: dial-sweep 1.35s ease-out; }
+  @keyframes dial-sweep {
+    from { transform: rotate(-64deg); opacity: 0; }
+    20%, 74% { opacity: 1; } to { transform: rotate(230deg); opacity: 0; }
+  }
+  .dial-readout { display: grid; justify-items: center; }
+  .dial-readout strong { font-size: clamp(1rem, 2.15vw, 1.65rem); line-height: 1.1; margin: 0 0 4px; letter-spacing: -.045em; }
+  .dial-readout span { font-size: .73rem; font-weight: 650; letter-spacing: .07em; color: #a5cedf; }
+
+  .operations-core { grid-area: workspace; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 7px; min-width: 0; min-height: 0; }
+  .operations-tabs { display: flex; align-items: stretch; gap: 6px; flex-wrap: wrap; padding-inline: 14px; }
+  .operations-tabs button {
+    display: inline-flex; justify-content: center; align-items: center; gap: 6px;
+    padding: 6px 10px; margin: 0; color: #bfd0e6; background: #14243a;
+    border: 1px solid #314b67; border-radius: 8px; font-size: .83rem;
+  }
+  .operations-tabs button[aria-selected="true"] { background: #203b51; color: var(--accent); border-color: #548ca9; }
+  .operations-tabs button:hover { border-color: #669ab1; }
+  .operations-tabs button svg { width: 15px; height: 15px; }
+  .workspace-frame {
+    position: relative; isolation: isolate; min-height: 0; min-width: 0; display: grid;
+    border: 1px solid #436581; border-radius: 21px; background: #101d30;
+    box-shadow: inset 0 0 32px #1c56791e, 0 12px 32px #030a1655; overflow: hidden;
+  }
+  .workspace-scroll { min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+  .workspace-pane { min-width: 0; margin: 0; }
+  .workspace-pane:focus-visible { outline-offset: -4px; }
+  .workspace-pane .panel-head { background: #14253a90; }
+  #view-chat { display: flex; flex-direction: column; min-height: 100%; }
+  #view-chat #chat-history { flex: 1; max-height: 42vh; min-height: 112px; }
+  #view-chat #chat-empty { min-height: 112px; }
+  #view-chat #chat-form { margin-top: auto; padding-block: 8px; }
+  #view-chat #message { padding-block: 6px; }
+
+  @media (min-width: 980px) and (min-height: 700px) {
+    .cockpit { height: 100dvh; grid-template-rows: auto auto minmax(0, 1fr) auto auto; }
+  }
+  @media (max-width: 740px) {
+    .operations-stage { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      grid-template-areas: "left right" "workspace workspace"; }
+    .instrument-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 0; align-items: center; }
+    .instrument { width: min(100%, 106px); }
+    .workspace-frame { min-height: 300px; }
+    .operations-tabs { padding-inline: 0; gap: 4px; }
+    .operations-tabs button { padding-inline: 7px; font-size: .76rem; }
+    .process-dock .table-scroll { max-height: 178px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .live-dock.sample-motion::before, .instrument .gauge.sample-motion::after { animation: none; }
+  }
+  .cockpit { width: min(100%, 1800px); padding-inline: clamp(12px, 2.4vw, 40px); }
+  .operations-stage { gap: clamp(7px, 1.25vw, 18px); grid-template-columns: minmax(76px, .125fr) minmax(0, 1fr) minmax(76px, .125fr); }
+  .workspace-frame { border-radius: 8px; border-color: #4a7894; overflow: visible;
+    box-shadow: 0 0 0 3px #21455b44, inset 0 0 30px #1c56791e; }
+  .workspace-scroll { border-radius: inherit; }
+  .cockpit { position: relative; isolation: isolate; }
+  .board-traces {
+    position: absolute; inset: 0; z-index: -1; width: 100%; height: 100%;
+    fill: none; pointer-events: none;
+    mask-image: linear-gradient(90deg, transparent, #000 14%, #000 86%, transparent),
+      linear-gradient(transparent, #000 13%, #000 87%, transparent);
+    mask-composite: intersect;
+  }
+  .board-traces .trace { stroke: #528baa; stroke-opacity: .28; stroke-width: 1; }
+  .board-traces .trace-pulse { stroke: #8deeff; stroke-width: 1.8;
+    stroke-linecap: round; stroke-dasharray: 15 100; stroke-dashoffset: 15;
+    opacity: 0; filter: drop-shadow(0 0 3px #64dafa); }
+  .board-traces.sample-motion { animation: board-glow 1.35s ease-out; }
+  .board-traces.sample-motion .trace-pulse { animation: board-current 1.35s ease-out; }
+  @keyframes board-glow { from { opacity: .8; } 30% { opacity: 1; } to { opacity: .8; } }
+  @keyframes board-current {
+    from { stroke-dashoffset: 15; opacity: 0; }
+    22% { opacity: .82; }
+    85% { opacity: .25; }
+    to { stroke-dashoffset: -100; opacity: 0; }
+  }
+  .incident-strip {
+    grid-row: 2; justify-self: center; width: min(100%, 1050px);
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px;
+  }
+  .incident-strip .incident-dock { grid-row: auto; width: 100%; }
+  .resolved-badge { display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    margin: 0; min-height: 42px; padding: 6px 12px; color: #a9e7df; background: #152a39;
+    border: 1px solid #426d7d; font-size: .82rem; }
+  .resolved-badge:hover { background: #203e4e; }
+  #resolved-count { font-variant-numeric: tabular-nums; padding: 1px 6px; border-radius: 5px; background: #214352; }
+  @media (max-width: 460px) {
+    .incident-strip { gap: 6px; }
+    .resolved-badge { padding-inline: 6px; gap: 4px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .board-traces.sample-motion, .board-traces.sample-motion .trace-pulse { animation: none; }
+  }
+  #monitor-safe { color: #81ebbd; }
+  .incident-dock[data-open="true"] { border-color: #e47379; background: linear-gradient(100deg,#3c202b,#211e2c);
+    box-shadow: 0 0 18px #d8536138; }
+  #monitor-alert, .incident-dock[data-open="true"] .dock-count { color: #ffc2c3; }
+  .incident-list summary time { font-size: .74rem; color: var(--muted); }
+  .process-dock { width: 100%; border-inline-color: transparent; border-radius: 8px;
+    background: linear-gradient(90deg,transparent,#14263b 9%,#14263b 91%,transparent); }
+  .process-dock::after { content: ""; pointer-events: none; position: absolute; inset: 0;
+    z-index: 2; background: linear-gradient(90deg,#0a1522 0%,transparent 3%,transparent 97%,#0a1522 100%); }
+  .process-dock :is(.panel-head, table, #empty) { padding-inline: 4%; }
+  .process-dock table { width: 92%; margin-inline: auto; }
+  .resolved-dialog { width: min(960px, calc(100vw - 28px)); }
+  .resolved-dialog td { white-space: normal; overflow-wrap: anywhere; }
+  @media(max-width: 740px) {
+    .operations-stage { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    .process-dock::after { display: none; }
+  }
 </style>
-<main>
+<main class="cockpit" id="cockpit" data-feed="waiting">
+  <svg id="board-traces" class="board-traces" aria-hidden="true"></svg>
   <header>
-    <h1>Linux Admin Agent</h1>
+    <h1><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18v14H3zM7 9l3 3-3 3m6 0h4"/></svg>Linux Admin Agent</h1>
     <div id="status" role="status">Đang chờ mẫu đầu tiên…</div>
   </header>
-  <div class="metrics">
-    <article><div class="gauge" id="cpu-gauge"><strong id="cpu">—</strong></div><div>CPU</div></article>
-    <article><div class="gauge" id="ram-gauge"><strong id="ram">—</strong></div><div>RAM</div></article>
-    <article><div class="gauge" id="swap-gauge"><strong id="swap">—</strong></div><div>Swap</div></article>
-    <article><div class="gauge" id="disk-gauge"><strong id="disk">—</strong></div><div>Đĩa /</div></article>
-  </div>
   <p id="errors" hidden></p>
-  <section class="panel" id="monitor-panel" hidden style="margin-top: 16px">
+  <div class="incident-strip">
+    <section class="panel live-dock incident-dock" id="monitor-panel" aria-labelledby="monitor-title">
+      <div class="panel-head">
+        <svg id="monitor-safe" class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" hidden><path d="M12 22s7-3 7-9V6l-7-3-7 3v7c0 6 7 9 7 9Zm-3-10 2 2 4-4"/></svg>
+        <svg id="monitor-alert" class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" hidden><path d="M12 8v4m0 4h.01M3 20l9-16 9 16H3Z"/></svg>
+        <h2 id="monitor-title">Sự cố giám sát</h2>
+        <span id="monitor-count" class="dock-count" hidden></span>
+        <p id="monitor-state" role="status">Đang chờ dữ liệu giám sát…</p>
+      </div>
+      <div id="incidents" class="incident-list"></div>
+    </section>
+    <button class="resolved-badge" id="resolved-open" type="button" aria-haspopup="dialog" disabled>
+      <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 1 2.64 6.36M3 17v-5h5m1 1 2 2 5-5"/></svg>
+      <span>Đã xử lý</span><span id="resolved-count">—</span>
+    </button>
+  </div>
+  <div class="operations-stage">
+    <aside class="instrument-rail rail-left" aria-label="CPU và RAM">
+        <article class="instrument">
+          <div class="gauge" id="cpu-gauge"><div class="dial-readout"><strong id="cpu">—</strong><span>CPU</span></div></div>
+        </article>
+        <article class="instrument">
+          <div class="gauge" id="ram-gauge"><div class="dial-readout"><strong id="ram">—</strong><span>RAM</span></div></div>
+        </article>
+    </aside>
+    <div class="operations-core">
+      <div class="operations-tabs" role="tablist" aria-label="Công cụ quản trị">
+        <button id="tab-chat" type="button" role="tab" aria-controls="view-chat" aria-selected="true">
+          <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a7 7 0 0 1-7 7H8l-4 3v-6a7 7 0 0 1 7-7h2a7 7 0 0 1 7 3Z"/></svg>Chat
+        </button>
+        <button id="tab-security" type="button" role="tab" aria-controls="view-security" aria-selected="false" tabindex="-1">
+          <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s7-3 7-9V6l-7-3-7 3v7c0 6 7 9 7 9Z"/></svg>Bảo mật
+        </button>
+        <button id="tab-demo" type="button" role="tab" aria-controls="view-demo" aria-selected="false" tabindex="-1">
+          <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6m-5 0v7l-5 8a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-8V3M8 15h8"/></svg>Mô phỏng sự cố
+        </button>
+      </div>
+      <div class="workspace-frame">
+        <div class="workspace-scroll">
+    <section class="workspace-pane" id="view-chat" role="tabpanel" aria-labelledby="tab-chat" tabindex="0">
+      <div class="panel-head">
+        <h2 id="chat-title"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a7 7 0 0 1-7 7H8l-4 3v-6a7 7 0 0 1 6-11h3a7 7 0 0 1 7 7ZM8 10h8m-8 4h5"/></svg>Chat chẩn đoán</h2>
+        <p id="chat-state" role="status">Đang kết nối…</p>
+      </div>
+      <div id="chat-history" aria-live="polite">
+        <div id="chat-empty"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a7 7 0 0 1-7 7H8l-4 3v-6a7 7 0 0 1 6-11h3a7 7 0 0 1 7 7ZM8 10h8m-8 4h5"/></svg><p>Máy đang gặp vấn đề gì?</p>
+          <button type="button" id="chat-example" hidden>Kiểm tra CPU và RAM</button>
+        </div>
+      </div>
+      <form id="chat-form" hidden>
+        <label for="message">Câu hỏi</label>
+        <textarea id="message" rows="2" maxlength="1500" required
+                  placeholder="Ví dụ: Kiểm tra tải CPU và RAM"></textarea>
+        <button type="submit"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 4 18 8-18 8 3-8-3-8Zm3 8h15"/></svg><span>Gửi</span></button>
+      </form>
+    </section>
+  <section class="workspace-pane security-panel" id="view-security" role="tabpanel" aria-labelledby="tab-security" tabindex="0" hidden>
     <div class="panel-head">
-      <h2><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12h5l3-7 4 14 3-7h5"/></svg>Sự cố giám sát</h2>
-      <p id="monitor-state" role="status"></p>
+      <h2 id="security-title"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s7-3 7-9V6l-7-3-7 3v7c0 6 7 9 7 9Zm-3-10 2 2 4-4"/></svg>Bảo mật</h2>
+      <p id="security-ssh-state" class="meta">Đang đọc trạng thái giám sát SSH…</p>
     </div>
-    <div id="incidents" class="incident-list"></div>
+    <div class="security-tools">
+      <div>
+        <h3><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7 12 3l8 4v10l-8 4-8-4V7Zm0 0 8 4 8-4m-8 4v10"/></svg>Bản vá Ubuntu</h3>
+        <button class="security-action" id="security-scan" type="button"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4M4 12h16"/></svg>Quét bản vá</button>
+        <p class="security-note" id="security-scan-state" role="status"></p>
+      </div>
+      <div>
+        <h3><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 12l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>Xác minh bản vá</h3>
+        <form id="security-verify">
+          <label>Gói <input name="package" required maxlength="128" placeholder="nano:amd64"></label>
+          <label>Mã USN <input name="usn" required maxlength="128" placeholder="USN-8386-1"></label>
+          <button class="security-action" type="submit"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>Xác minh</button>
+        </form>
+        <p class="security-note" id="security-verify-state" role="status"></p>
+        <p class="security-note" id="security-selected" hidden></p>
+      </div>
+    </div>
+    <div class="security-results">
+      <div id="security-findings" hidden>
+        <div class="patch-toolbar">
+          <div class="patch-switch" role="group" aria-label="Trạng thái bản vá">
+            <button class="security-action" id="patch-missing" type="button" aria-pressed="true">
+              <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v4m0 4h.01M3 20l9-16 9 16H3Z"/></svg><span>Chưa cài bản vá</span>
+            </button>
+            <button class="security-action" id="patch-patched" type="button" aria-pressed="false">
+              <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg><span>Đã cài bản vá</span>
+            </button>
+          </div>
+          <div class="patch-filters" role="group" aria-label="Lọc danh sách gói">
+            <label class="patch-search-field">Tìm kiếm
+              <input id="patch-search" type="search" placeholder="Tên gói hoặc USN">
+            </label>
+            <label>Loại gói <select id="patch-category"><option value="">Tất cả loại</option></select></label>
+            <label>Kiến trúc <select id="patch-architecture"><option value="">Tất cả kiến trúc</option></select></label>
+          </div>
+        </div>
+        <div class="table-scroll security-findings">
+          <table>
+            <thead>
+              <tr><th scope="col">Tên gói</th><th scope="col">Kiến trúc</th><th scope="col">Loại gói</th>
+                  <th scope="col">Đang cài</th><th scope="col">Mốc vá</th>
+                  <th scope="col">Vá lỗi gì?</th><th scope="col" aria-label="Thao tác"></th></tr>
+            </thead>
+            <tbody id="security-rows"></tbody>
+          </table>
+        </div>
+        <div class="patch-count">
+          <p id="patch-count" class="security-note" role="status"></p>
+          <button class="security-action" id="patch-more" type="button" hidden>Xem thêm</button>
+        </div>
+      </div>
+      <details id="security-history">
+        <summary>Lịch sử xác minh</summary>
+        <p id="security-history-state" class="security-note" role="status"></p>
+        <div class="table-scroll" id="security-history-table" hidden>
+          <table>
+            <thead><tr><th>Thời gian</th><th>Đối tượng</th><th>USN</th><th>Kết quả</th></tr></thead>
+            <tbody id="security-history-rows"></tbody>
+          </table>
+        </div>
+      </details>
+    </div>
   </section>
-  <section class="panel" style="margin-top: 16px" aria-labelledby="demo-title">
+  <section class="workspace-pane" id="view-demo" role="tabpanel" aria-labelledby="tab-demo" tabindex="0" hidden>
     <div class="panel-head">
       <h2 id="demo-title"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6m-5 0v7l-5 8a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-8V3M8 15h8"/></svg>Mô phỏng sự cố</h2>
       <p class="meta">Tạo lỗi trên dịch vụ HTTP thử nghiệm chỉ lắng nghe loopback.</p>
@@ -157,27 +529,21 @@
       </div>
     </div>
   </section>
-  <div class="workspace">
-    <section class="panel" aria-labelledby="chat-title">
-      <div class="panel-head">
-        <h2 id="chat-title"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a7 7 0 0 1-7 7H8l-4 3v-6a7 7 0 0 1 6-11h3a7 7 0 0 1 7 7ZM8 10h8m-8 4h5"/></svg>Chat chẩn đoán</h2>
-        <p id="chat-state" role="status">Đang kết nối…</p>
-      </div>
-      <div id="chat-history" aria-live="polite">
-        <div id="chat-empty"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a7 7 0 0 1-7 7H8l-4 3v-6a7 7 0 0 1 6-11h3a7 7 0 0 1 7 7ZM8 10h8m-8 4h5"/></svg><p>Máy đang gặp vấn đề gì?</p>
-          <button type="button" id="chat-example" hidden>Kiểm tra CPU và RAM</button>
         </div>
       </div>
-      <form id="chat-form" hidden>
-        <label for="message">Câu hỏi</label>
-        <textarea id="message" rows="2" maxlength="1500" required
-                  placeholder="Ví dụ: Kiểm tra tải CPU và RAM"></textarea>
-        <button type="submit"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 4 18 8-18 8 3-8-3-8Zm3 8h15"/></svg><span>Gửi</span></button>
-      </form>
-    </section>
-    <section class="panel" aria-labelledby="process-title">
-      <div class="panel-head"><h2 id="process-title"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM9 8h6m-6 4h6m-6 4h3"/></svg>Tiến trình dùng nhiều RAM</h2></div>
-      <div class="table-scroll">
+    </div>
+    <aside class="instrument-rail rail-right" aria-label="Swap và ổ đĩa">
+        <article class="instrument">
+          <div class="gauge" id="swap-gauge"><div class="dial-readout"><strong id="swap">—</strong><span>SWAP</span></div></div>
+        </article>
+        <article class="instrument">
+          <div class="gauge" id="disk-gauge"><div class="dial-readout"><strong id="disk">—</strong><span>ĐĨA /</span></div></div>
+        </article>
+    </aside>
+  </div>
+    <section class="panel live-dock process-dock" id="process-panel" aria-labelledby="process-title">
+      <div class="panel-head"><h2 id="process-title"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM9 8h6m-6 4h6m-6 4h3"/></svg>Các tiến trình đang chạy</h2><span class="dock-count" id="process-count">Theo mức sử dụng RAM</span></div>
+      <div class="table-scroll" tabindex="0" aria-label="Tiến trình sắp theo mức dùng RAM">
         <table>
           <thead><tr><th>PID</th><th>Tiến trình</th><th>RAM</th><th>RAM cư trú</th></tr></thead>
           <tbody id="processes"></tbody>
@@ -185,7 +551,30 @@
       </div>
       <p id="empty">Đang chờ dữ liệu tiến trình.</p>
     </section>
-  </div>
+  <dialog id="resolved-dialog" class="package-dialog resolved-dialog" aria-labelledby="resolved-title">
+    <div class="panel-head package-dialog-head">
+      <h2 id="resolved-title">Sự cố đã xử lý</h2>
+      <form method="dialog"><button type="submit" aria-label="Đóng" title="Đóng" autofocus><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></form>
+    </div>
+    <div class="package-dialog-body">
+      <p id="resolved-status" role="status"></p>
+      <div class="table-scroll" id="resolved-table" hidden>
+        <table><thead><tr><th>Sự cố</th><th>Loại</th><th>Phát hiện</th><th>Kết thúc</th><th>Chi tiết ghi nhận</th></tr></thead>
+          <tbody id="resolved-rows"></tbody></table>
+      </div>
+    </div>
+  </dialog>
+  <dialog id="package-dialog" class="package-dialog" aria-labelledby="package-title">
+    <div class="panel-head package-dialog-head">
+      <h2 id="package-title"></h2>
+      <form method="dialog"><button type="submit" aria-label="Đóng" title="Đóng" autofocus><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></form>
+    </div>
+    <div class="package-dialog-body">
+      <p class="meta" id="package-meta"></p>
+      <p class="meta" id="package-status" role="status"></p>
+      <div id="package-content"></div>
+    </div>
+  </dialog>
 </main>
 <script>
   const byId = id => document.getElementById(id);
@@ -196,8 +585,94 @@
     byId(id).textContent = percent(value);
     const gauge = byId(id + "-gauge");
     const fill = Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
-    gauge.style.setProperty("--fill", fill + "%");
-    gauge.style.setProperty("--hue", 145 * (1 - fill / 100));
+    gauge.style.setProperty("--fill", (fill * .76) + "%");
+  }
+
+  const tabs = Array.from(document.querySelectorAll(".operations-tabs [role=tab]"));
+  const workspaceScroll = document.querySelector(".workspace-scroll");
+
+  function openWorkspace(selected, moveFocus = false) {
+    for (const tab of tabs) {
+      const active = tab === selected;
+      tab.setAttribute("aria-selected", String(active));
+      tab.tabIndex = active ? 0 : -1;
+      byId(tab.getAttribute("aria-controls")).hidden = !active;
+    }
+    workspaceScroll.scrollTop = 0;
+    if (moveFocus) selected.focus();
+  }
+
+  tabs.forEach((tab, index) => {
+    tab.addEventListener("click", () => openWorkspace(tab));
+    tab.addEventListener("keydown", event => {
+      const next = {
+        ArrowRight: (index + 1) % tabs.length,
+        ArrowLeft: (index - 1 + tabs.length) % tabs.length,
+        Home: 0,
+        End: tabs.length - 1,
+      }[event.key];
+      if (next === undefined) return;
+      event.preventDefault();
+      openWorkspace(tabs[next], true);
+    });
+  });
+
+  const cockpit = byId("cockpit");
+  const boardTraces = byId("board-traces");
+  const workspaceFrame = document.querySelector(".workspace-frame");
+  function drawBoardTraces() {
+    const page = cockpit.getBoundingClientRect();
+    const frame = workspaceFrame.getBoundingClientRect();
+    if (!page.width || !page.height) return;
+    boardTraces.setAttribute("viewBox", `0 0 ${page.width} ${page.height}`);
+    const traces = [];
+    for (const side of ["left", "right", "top", "bottom"]) {
+      const horizontal = side === "left" || side === "right";
+      const reverse = side === "left" || side === "top";
+      const direction = reverse ? -1 : 1;
+      const edge = horizontal ? frame[side] - page.left : frame[side] - page.top;
+      const start = horizontal ? frame.top - page.top : frame.left - page.left;
+      const span = horizontal ? frame.height : frame.width;
+      const extent = horizontal ? page.width : page.height;
+      const reach = reverse ? edge : extent - edge;
+      if (reach < 12 || span < 12) continue;
+      const lanes = horizontal ? 11 : 17;
+      for (let lane = 0; lane < lanes; lane++) {
+        const origin = start + span * (.07 + .86 * lane / (lanes - 1));
+        const end = reach * (.68 + (lane % 4) * .085);
+        const bend = Math.min(end * .25, 10 + (lane % 5) * 7);
+        const shift = (lane < lanes / 2 ? -1 : 1) * Math.min(end * .24, 10 + lane * 2);
+        const point = (out, along) => horizontal
+          ? `${edge + out * direction} ${along}` : `${along} ${edge + out * direction}`;
+        const shape = `M ${point(0, origin)} L ${point(bend, origin)} ${point(bend + Math.abs(shift), origin + shift)} ${point(end, origin + shift)}`;
+        for (const kind of ["trace", "trace-pulse"]) {
+          const line = document.createElementNS("http://www.w3.org/2000/svg", "path");
+          line.setAttribute("class", kind);
+          line.setAttribute("d", shape);
+          line.setAttribute("pathLength", "100");
+          traces.push(line);
+        }
+      }
+    }
+    boardTraces.replaceChildren(...traces);
+  }
+  const boardSize = new ResizeObserver(drawBoardTraces);
+  boardSize.observe(cockpit);
+  boardSize.observe(workspaceFrame);
+  window.addEventListener("resize", drawBoardTraces);
+
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  let lastAnimatedSample;
+  function markSample(timestamp, fresh, targets) {
+    cockpit.dataset.feed = fresh ? "live" : "stale";
+    if (!fresh || timestamp === lastAnimatedSample || reducedMotion.matches) return;
+    lastAnimatedSample = timestamp;
+    for (const target of targets) {
+      target.classList.add("sample-motion");
+      target.addEventListener("animationend", event => {
+        if (event.target === target) target.classList.remove("sample-motion");
+      }, {once: true});
+    }
   }
 
   function render(snapshot) {
@@ -229,13 +704,29 @@
       return row;
     });
     byId("processes").replaceChildren(...rows);
+    byId("process-count").textContent = rows.length ? rows.length +
+      " tiến trình · theo RAM" : "Theo mức sử dụng RAM";
     byId("empty").hidden = rows.length > 0;
     byId("empty").textContent = snapshot.processes.status === "success"
       ? "Không quan sát được tiến trình nào."
       : "Chưa đọc được dữ liệu tiến trình.";
-    if (snapshot.incidents || snapshot.monitor_errors) {
-      byId("monitor-panel").hidden = false;
-      const incidents = snapshot.incidents || [];
+    const ssh = snapshot.ssh_monitor;
+    byId("security-ssh-state").textContent = !("ssh_monitor" in snapshot)
+      ? "Giám sát SSH chưa bật."
+      : !ssh ? "Đang chờ mẫu SSH đầu tiên."
+      : ssh.status === "ok" ? "Giám sát SSH hoạt động · " + securityTime(ssh.timestamp)
+      : "Thiếu dữ liệu SSH · " + (ssh.detail || "Kiểm tra quyền đọc journal.");
+    const monitoring = Array.isArray(snapshot.incidents) || Array.isArray(snapshot.monitor_errors);
+    if (monitoring) {
+      const incidents = snapshot.active_incidents || (snapshot.incidents || []).filter(incident => !incident.cleared_at);
+      const count = incidents.length;
+      byId("resolved-count").textContent = snapshot.resolved_count ?? "—";
+      byId("resolved-open").disabled = !Number.isInteger(snapshot.resolved_count);
+      byId("monitor-alert").hidden = count === 0;
+      const badge = byId("monitor-count");
+      badge.textContent = count + " đang mở";
+      badge.hidden = count === 0;
+      byId("monitor-panel").dataset.open = String(count > 0);
       const list = byId("incidents");
       const signature = JSON.stringify(incidents);
       if (list.dataset.signature !== signature) {
@@ -250,22 +741,52 @@
           addText(line, "span", incidentCategory(incident.category)).className = "incident-type";
           addText(line, "span", incident.cleared_at ? "Tín hiệu đã hết" : "Đang mở")
             .className = incident.cleared_at ? "incident-state" : "incident-state active";
+          const timestamp = addText(line, "time", securityTime(incident.opened_at));
+          timestamp.dateTime = incident.opened_at;
           const body = addText(row, "div", "");
           body.className = "incident-evidence";
           addText(body, "p", incident.evidence);
-          addText(body, "time", "Phát hiện " + new Date(incident.opened_at).toLocaleString("vi-VN"));
+          if (incident.subject.startsWith("security:ssh:") && !incident.cleared_at) {
+            renderSshVerification(body, incident);
+          }
           return row;
         }));
         list.dataset.signature = signature;
       }
-      const errors = snapshot.monitor_errors || [];
+      const errors = [...(snapshot.monitor_errors || [])];
+      if ("ssh_monitor" in snapshot) {
+        const ssh = snapshot.ssh_monitor;
+        if (!ssh) errors.push("SSH đang chờ mẫu đầu tiên");
+        else if (ssh.status !== "ok") errors.push("SSH · " + ssh.detail);
+      }
+      byId("monitor-safe").hidden = count > 0 || errors.length > 0;
       byId("monitor-state").textContent = errors.length
         ? "Thiếu dữ liệu: " + errors.join(", ")
         : incidents.length ? "" : "Chưa ghi nhận sự cố.";
+    } else {
+      byId("resolved-count").textContent = "—";
+      byId("resolved-open").disabled = true;
+      byId("monitor-safe").hidden = true;
+      byId("monitor-alert").hidden = true;
+      byId("monitor-count").hidden = true;
+      byId("monitor-panel").dataset.open = "false";
+      byId("monitor-state").textContent = "Giám sát sự cố chưa bật.";
+      byId("incidents").replaceChildren();
+      delete byId("incidents").dataset.signature;
     }
     const time = new Date(snapshot.timestamp);
-    const state = Date.now() - time.getTime() > 15000 ? "Mẫu đã cũ" : "Đang cập nhật";
-    byId("status").textContent = state + " · Mẫu lúc " + time.toLocaleTimeString("vi-VN");
+    const fresh = Number.isFinite(time.getTime()) && Date.now() - time.getTime() <= 15000;
+    const targets = [];
+    if (snapshot.system.status === "success") {
+      targets.push(byId("cpu-gauge"), byId("ram-gauge"), byId("swap-gauge"));
+    }
+    if (snapshot.disk.status === "success") targets.push(byId("disk-gauge"));
+    if (snapshot.processes.status === "success") targets.push(byId("process-panel"));
+    if (monitoring && !(snapshot.monitor_errors || []).length) targets.push(byId("monitor-panel"));
+    if (targets.length) targets.push(boardTraces);
+    markSample(snapshot.timestamp, fresh, targets);
+    byId("status").textContent = (fresh ? "Dữ liệu trực tiếp" : "Mẫu đã cũ") +
+      " · " + time.toLocaleTimeString("vi-VN");
   }
 
   async function refresh() {
@@ -276,6 +797,7 @@
       if (!response.ok) throw new Error("HTTP " + response.status);
       render(await response.json());
     } catch (error) {
+      cockpit.dataset.feed = "stale";
       byId("status").textContent = "Chưa nhận được mẫu mới. Đang thử lại…";
     } finally {
       clearTimeout(timeout);
@@ -305,6 +827,419 @@
     parent.append(node);
     return node;
   }
+
+  const securityLabels = {
+    missing: "Có bản vá còn thiếu", clear: "Không thấy bản vá thiếu trong phạm vi quét",
+    patched: "Đã xác minh bản vá", still_missing: "Vẫn thiếu bản vá",
+    restart_required: "Đã cài bản vá, Ubuntu báo cần khởi động lại",
+    inconclusive: "Chưa đủ dữ liệu để xác minh", signal_present: "Tín hiệu SSH vẫn còn",
+    signal_cleared: "Tín hiệu SSH đã hết", review_required: "Cần rà soát phiên SSH",
+  };
+  function securityTime(timestamp) {
+    return timestamp ? new Date(timestamp).toLocaleString("vi-VN") : "—";
+  }
+  async function securityRequest(action, payload, signal) {
+    const response = await fetch("/api/security/" + action, payload === undefined ? {} : {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload), signal,
+    });
+    const result = await response.json();
+    if (!response.ok || result.ok === false) throw new Error(result.error || "Yêu cầu thất bại.");
+    return result;
+  }
+  async function securityRun(button, status, pending, task) {
+    button.disabled = true;
+    status.textContent = pending;
+    try {
+      await task();
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  }
+  async function refreshSecurityHistory() {
+    if (!byId("security-history").open) return;
+    try {
+      const data = await securityRequest("history");
+      const rows = byId("security-history-rows");
+      rows.replaceChildren();
+      for (const event of data.events) {
+        const row = addText(rows, "tr", "");
+        for (const value of [securityTime(event.timestamp), event.target, event.usn,
+                             securityLabels[event.status] || event.status]) {
+          addText(row, "td", value ?? "—");
+        }
+      }
+      byId("security-history-table").hidden = !data.events.length;
+      byId("security-history-state").textContent = !data.audit_enabled ? "Audit chưa bật."
+        : data.events.length ? "" : "Chưa ghi nhận lượt xác minh.";
+    } catch (error) {
+      byId("security-history-state").textContent = error.message;
+    }
+  }
+  function renderSshVerification(body, incident) {
+    const controls = addText(body, "div", "");
+    controls.className = "security-controls";
+    const button = addText(controls, "button", "Kiểm tra lại SSH");
+    const status = addText(body, "p", "");
+    status.setAttribute("role", "status");
+    const label = addText(controls, "label", "");
+    const reviewed = addText(label, "input", "");
+    reviewed.type = "checkbox";
+    label.append(" Đã rà soát phiên đăng nhập");
+    label.hidden = !incident.evidence.startsWith("Cần rà soát");
+    button.addEventListener("click", () => securityRun(button, status, "Đang kiểm tra…", async () => {
+      const result = await securityRequest("verify-ssh", {
+        incident_id: incident.id, reviewed: reviewed.checked,
+      });
+      status.textContent = result.detail || securityLabels[result.status];
+      if (result.closed) status.textContent += " Cảnh báo đã đóng.";
+      if (result.status === "review_required") label.hidden = false;
+      refreshSecurityHistory();
+    }));
+  }
+  const packageDescriptionsVi = [
+    [/^gstreamer1\.0-plugins-ugly(?:$|-)/, "Bộ thành phần bổ sung cho GStreamer để mở rộng hỗ trợ định dạng âm thanh và video."],
+    [/^libavformat\d+$/, "Thư viện FFmpeg để đọc và ghi các định dạng tệp âm thanh, video."],
+    [/^libavcodec\d+$/, "Thư viện FFmpeg để mã hóa và giải mã âm thanh, video."],
+    [/^libavfilter\d+$/, "Thư viện FFmpeg cung cấp bộ lọc để xử lý âm thanh và video."],
+    [/^libavdevice\d+$/, "Thư viện FFmpeg dùng để thu hoặc phát dữ liệu qua thiết bị âm thanh, video."],
+    [/^libavutil\d+$/, "Thư viện chứa các hàm hỗ trợ dùng chung của FFmpeg."],
+    [/^libswscale\d+$/, "Thư viện đổi kích thước video và chuyển đổi định dạng điểm ảnh."],
+    [/^libswresample\d+$/, "Thư viện đổi tần số lấy mẫu và định dạng âm thanh."],
+    [/^libpostproc\d+$/, "Thư viện xử lý bổ sung cho video đã giải mã."],
+    [/^libaom\d+$/, "Thư viện mã hóa và giải mã video AV1."],
+    [/^libzvbi-common$/, "Tệp dùng chung của thư viện ZVBI để hỗ trợ giải mã dữ liệu truyền hình như Teletext."],
+    [/^libzvbi\d+$/, "Thư viện giải mã dữ liệu đi kèm tín hiệu truyền hình, chẳng hạn Teletext."],
+    [/^ffmpeg$/, "Bộ công cụ dòng lệnh để chuyển đổi, ghi và xử lý âm thanh, video."],
+    [/^nano(?:-tiny)?$/, "Trình soạn thảo văn bản dùng trong terminal."],
+    [/^coreutils$/, "Bộ lệnh quản lý tệp và thư mục, gồm ls, cp và rm."],
+    [/^tzdata$/, "Dữ liệu múi giờ dùng để tính và hiển thị giờ địa phương."],
+    [/^openssh-server$/, "Dịch vụ cho phép kết nối và quản trị máy từ xa qua SSH."],
+    [/^openssh-client$/, "Bộ lệnh kết nối máy từ xa và truyền tệp qua SSH."],
+    [/^libglib2\.0-0$/, "Thư viện nền của GLib, cung cấp cấu trúc dữ liệu và vòng lặp sự kiện cho ứng dụng."],
+    [/^dnsmasq-base$/, "Công cụ cung cấp bộ nhớ đệm DNS và dịch vụ cấp địa chỉ IP qua DHCP."],
+  ];
+  const packageRoleDescriptions = {
+    "Âm thanh": "Gói dùng để xử lý hoặc phát âm thanh.",
+    "Bộ nhớ": "Gói hỗ trợ quản lý bộ nhớ.",
+    "Cơ sở dữ liệu": "Gói hỗ trợ lưu trữ hoặc truy vấn cơ sở dữ liệu.",
+    "Công cụ bảo mật": "Gói hỗ trợ kiểm tra hoặc bảo vệ hệ thống.",
+    "Công cụ phát triển": "Gói cung cấp thành phần dùng khi phát triển phần mềm.",
+    "Đa phương tiện": "Gói hỗ trợ xử lý âm thanh hoặc video.",
+    "Đồ họa": "Gói hỗ trợ hiển thị hoặc xử lý hình ảnh.",
+    "Mạng": "Gói hỗ trợ kết nối hoặc cung cấp dịch vụ mạng.",
+    "Thư điện tử": "Gói hỗ trợ gửi, nhận hoặc xử lý thư điện tử.",
+    "Hệ sinh thái Python": "Gói cung cấp mô-đun hoặc công cụ cho chương trình Python.",
+    "Hệ sinh thái Ruby": "Gói cung cấp thư viện hoặc công cụ cho chương trình Ruby.",
+    "Hệ sinh thái Perl": "Gói cung cấp mô-đun hoặc công cụ cho chương trình Perl.",
+    "Trình bao": "Gói hỗ trợ chạy hoặc quản lý lệnh trong terminal.",
+    "Giao diện X11": "Gói hỗ trợ môi trường đồ họa dùng X11.",
+    "Giao diện GNOME": "Gói hỗ trợ môi trường máy tính GNOME.",
+    "Giao diện KDE": "Gói hỗ trợ môi trường máy tính KDE.",
+    "Nhân hệ điều hành": "Gói thuộc nhóm nhân Linux và các thành phần đi kèm.",
+    "Phần mềm web": "Gói hỗ trợ dịch vụ hoặc ứng dụng web.",
+    "Phông chữ": "Gói cung cấp dữ liệu phông chữ cho hệ thống.",
+    "Quản trị hệ thống": "Gói cung cấp thành phần phục vụ quản trị hệ thống.",
+    "Tài liệu": "Gói chứa tài liệu cho phần mềm.",
+    "Thư viện": "Gói cung cấp mã dùng chung cho chương trình khác.",
+    "Thư viện phát triển": "Gói cung cấp tệp để biên dịch phần mềm sử dụng thư viện.",
+    "Thư viện tương thích": "Gói hỗ trợ phần mềm phụ thuộc vào thư viện cũ.",
+    "Tiện ích": "Gói thuộc nhóm tiện ích hệ thống.",
+    "Trình soạn thảo": "Gói cung cấp công cụ chỉnh sửa văn bản.",
+  };
+  const synopsisDescriptionsVi = [
+    [/\b(av1|h\.26[45])\b.*\bcodec\b|\bcodec\b.*\b(av1|h\.26[45])\b/i, "Gói hỗ trợ mã hóa hoặc giải mã video."],
+    [/audio\/video|multimedia/i, "Gói hỗ trợ xử lý âm thanh hoặc video."],
+    [/shared librar|runtime librar/i, "Thư viện dùng chung khi chạy các chương trình phụ thuộc."],
+    [/development files|header files/i, "Tệp khai báo hoặc thư viện cần để biên dịch phần mềm."],
+    [/\btransitional package\b/i, "Gói chuyển tiếp để trình quản lý gói cài thành phần thay thế."],
+    [/\bdebug symbols\b/i, "Gói chứa thông tin dùng để gỡ lỗi chương trình."],
+    [/\bdocumentation\b/i, "Gói chứa tài liệu cho phần mềm."],
+    [/command.line utility|command line tool/i, "Gói cung cấp công cụ sử dụng từ dòng lệnh."],
+  ];
+  const toolDescriptionsVi = {
+    ls: "Liệt kê tệp và thư mục.", cp: "Sao chép tệp và thư mục.",
+    rm: "Xóa tệp hoặc thư mục.", mv: "Di chuyển hoặc đổi tên tệp.",
+    mkdir: "Tạo thư mục.", nano: "Chỉnh sửa văn bản trong terminal.",
+    ffmpeg: "Chuyển đổi hoặc xử lý âm thanh, video.",
+    ffprobe: "Đọc thông tin về định dạng và các luồng âm thanh, video.",
+    ffplay: "Phát tệp âm thanh hoặc video.",
+    ssh: "Kết nối vào máy từ xa qua SSH.", sshd: "Tiếp nhận kết nối SSH đến máy.",
+    scp: "Sao chép tệp giữa các máy qua SSH.", sftp: "Truyền tệp qua SSH.",
+  };
+
+  function packageCategoryVi(item) {
+    const label = item.package_category || "";
+    if (label === "Shell") return "Trình bao";
+    return label && label !== item.package_section ? label : "Chưa phân loại";
+  }
+  function packageSummaryVi(item, summary = item.package_summary || "") {
+    return packageDescriptionsVi.find(([pattern]) => pattern.test(item.package))?.[1]
+      || synopsisDescriptionsVi.find(([pattern]) => pattern.test(summary))?.[1]
+      || packageRoleDescriptions[packageCategoryVi(item)]
+      || "Chưa có mô tả tiếng Việt chi tiết cho gói này.";
+  }
+  function toolDescriptionVi(tool) {
+    return Object.hasOwn(toolDescriptionsVi, tool.name) ? toolDescriptionsVi[tool.name]
+      : synopsisDescriptionsVi.find(([pattern]) => pattern.test(tool.description || ""))?.[1]
+      || "Chưa có mô tả tiếng Việt cho lệnh này.";
+  }
+  function patchLabelVi(item) {
+    const title = item.patch_label || "";
+    const match = title.match(/^(.+?)\s+(?:(?:security\s+)?vulnerabilit(?:y|ies)|security\s+(?:update|fix)(?:s)?)$/i);
+    if (match) {
+      const product = match[1] === "GStreamer Ugly Plugins"
+        ? "bộ phần bổ sung Ugly của GStreamer" : match[1];
+      return "Lỗ hổng bảo mật trong " + product;
+    }
+    const regression = title.match(/^(.+?)\s+(?:update\s+)?regressions?$/i);
+    if (regression) return "Lỗi phát sinh sau cập nhật " + regression[1];
+    return "Bản vá bảo mật Ubuntu";
+  }
+
+  byId("resolved-open").addEventListener("click", async () => {
+    const dialog = byId("resolved-dialog");
+    const status = byId("resolved-status");
+    const table = byId("resolved-table");
+    const rows = byId("resolved-rows");
+    if (!dialog.open) dialog.showModal();
+    table.hidden = true;
+    rows.replaceChildren();
+    status.textContent = "Đang tải lịch sử…";
+    try {
+      const response = await fetch("/api/incidents/resolved");
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Không tải được lịch sử.");
+      if (!dialog.open) return;
+      for (const item of result.incidents) {
+        const row = addText(rows, "tr", "");
+        for (const cell of ["#" + item.id + " · " + item.subject, incidentCategory(item.category),
+          securityTime(item.opened_at), securityTime(item.cleared_at), item.evidence]) {
+          addText(row, "td", cell);
+        }
+      }
+      table.hidden = !result.incidents.length;
+      status.textContent = result.incidents.length ? "" : "Chưa có sự cố kết thúc.";
+    } catch (error) {
+      status.textContent = error.message;
+    }
+  });
+
+  const packageDialog = byId("package-dialog");
+  let packageRequest;
+  packageDialog.addEventListener("close", () => {
+    if (!packageDialog.open) packageRequest?.abort();
+  });
+
+  async function showPackage(item) {
+    packageRequest?.abort();
+    const controller = new AbortController();
+    packageRequest = controller;
+    const status = byId("package-status");
+    const content = byId("package-content");
+    byId("package-title").textContent = item.package;
+    byId("package-meta").textContent =
+      item.architecture + " · Đang cài " + item.installed_version +
+      " · Bản đã vá " + item.fixed_version + " · " + item.usn;
+    status.textContent = "Đang đọc thông tin gói trên máy…";
+    content.replaceChildren();
+    addText(content, "h3", "Vá lỗi gì?");
+    addText(content, "p", patchLabelVi(item));
+    if (item.patch_topics?.length) {
+      addText(content, "p", item.patch_topics.join(" · ")).className = "meta";
+    }
+    if (item.cves?.length) addText(content, "p", item.cves.join(" · ")).className = "meta";
+    if (!packageDialog.open) packageDialog.showModal();
+    try {
+      const data = await securityRequest("package-details", {
+        package: item.package, architecture: item.architecture,
+      }, controller.signal);
+      if (controller.signal.aborted) return;
+      status.textContent = "";
+      addText(content, "h3", "Gói này dùng để làm gì?");
+      addText(content, "p", packageCategoryVi(item)).className = "meta";
+      addText(content, "p", packageSummaryVi(item, data.summary));
+      addText(content, "h3", "Lệnh đi kèm");
+      if (data.tools.length) {
+        const list = addText(content, "ul", "");
+        for (const tool of data.tools) {
+          const entry = addText(list, "li", "");
+          addText(entry, "code", tool.name);
+          entry.append(" · " + toolDescriptionVi(tool));
+        }
+        if (data.tool_count > data.tools.length) {
+          addText(content, "p", "Đang hiển thị " + data.tools.length + "/" + data.tool_count + " lệnh.");
+        }
+      } else {
+        addText(content, "p", "Gói này không cung cấp lệnh trực tiếp.");
+      }
+      if (data.libraries.length) {
+        addText(content, "h3", "Tệp thư viện");
+        addText(content, "p", "Các tệp này cung cấp chức năng của gói cho chương trình khác.");
+        const list = addText(content, "ul", "");
+        for (const library of data.libraries) addText(addText(list, "li", ""), "code", library);
+        if (data.library_count > data.libraries.length) {
+          addText(content, "p", "Đang hiển thị " + data.libraries.length + "/" + data.library_count + " tệp.");
+        }
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) status.textContent = error.message;
+    }
+  }
+
+  const patchForm = byId("security-verify");
+  byId("security-history").addEventListener("toggle", refreshSecurityHistory);
+  const patchPageSize = 25;
+  let patchGroups = null;
+  let patchGroup = "missing";
+  let patchVisible = patchPageSize;
+
+  function selectPatchForVerification(item) {
+    patchForm.elements.package.value = item.package + ":" + item.architecture;
+    patchForm.elements.usn.value = item.usn;
+    byId("security-verify-state").textContent = "";
+    const note = byId("security-selected");
+    note.hidden = false;
+    note.textContent = "Mốc vá theo " + item.usn + " · " + item.fixed_version;
+    patchForm.elements.package.focus();
+  }
+
+  function renderPatchGroups() {
+    if (!patchGroups) return;
+    byId("patch-missing").querySelector("span").textContent = "Chưa cài bản vá (" + patchGroups.missing.length + ")";
+    byId("patch-patched").querySelector("span").textContent = "Đã cài bản vá (" + patchGroups.patched.length + ")";
+    byId("patch-missing").setAttribute("aria-pressed", String(patchGroup === "missing"));
+    byId("patch-patched").setAttribute("aria-pressed", String(patchGroup === "patched"));
+    const query = byId("patch-search").value.trim().toLocaleLowerCase("vi");
+    const category = byId("patch-category").value;
+    const architecture = byId("patch-architecture").value;
+    const matches = patchGroups[patchGroup].filter(item =>
+      (!category || category === packageCategoryVi(item)) &&
+      (!architecture || architecture === item.architecture) &&
+      [item.package, packageCategoryVi(item), item.usn, patchLabelVi(item), ...item.patch_topics].some(
+        value => value?.toLocaleLowerCase("vi").includes(query)
+      )
+    );
+    const visible = matches.slice(0, patchVisible);
+    const rows = byId("security-rows");
+    rows.replaceChildren();
+    for (const item of visible) {
+      const row = addText(rows, "tr", "");
+      const packageCell = addText(row, "td", "");
+      const packageButton = addText(packageCell, "button", item.package);
+      packageButton.type = "button";
+      packageButton.className = "package-link";
+      packageButton.setAttribute("aria-haspopup", "dialog");
+      packageButton.setAttribute("aria-label", "Chi tiết gói " + item.package + ":" + item.architecture);
+      packageButton.addEventListener("click", () => showPackage(item));
+      addText(packageCell, "small", packageSummaryVi(item)).className = "patch-summary";
+      addText(row, "td", item.architecture);
+      addText(addText(row, "td", ""), "span", packageCategoryVi(item)).className = "patch-kind";
+      addText(row, "td", item.installed_version);
+      addText(row, "td", item.fixed_version);
+      const notice = addText(row, "td", "");
+      addText(notice, "span", patchLabelVi(item)).className = "patch-title";
+      if (item.patch_topics.length) {
+        addText(notice, "small", item.patch_topics.join(" · ")).className = "patch-title meta";
+      }
+      if (/^USN-\d+-\d+$/.test(item.usn)) {
+        const link = addText(notice, "a", item.usn);
+        link.href = "https://ubuntu.com/security/notices/" + item.usn;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+      }
+      const button = addText(addText(row, "td", ""), "button", "");
+      button.type = "button";
+      button.className = "security-action security-action--icon";
+      button.title = "Chọn để xác minh";
+      button.setAttribute("aria-label", "Xác minh " + item.package + ":" + item.architecture);
+      const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      icon.setAttribute("class", "ui-icon");
+      icon.setAttribute("aria-hidden", "true");
+      icon.setAttribute("viewBox", "0 0 24 24");
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", "m5 12 4 4L19 6");
+      icon.append(path);
+      button.append(icon);
+      button.addEventListener("click", () => selectPatchForVerification(item));
+    }
+    byId("patch-more").hidden = visible.length >= matches.length;
+    byId("patch-count").textContent = matches.length
+      ? "Hiển thị " + visible.length + "/" + matches.length + " gói và kiến trúc"
+      : "Không có gói khớp bộ lọc.";
+  }
+  for (const status of ["missing", "patched"]) {
+    byId("patch-" + status).addEventListener("click", () => {
+      patchGroup = status;
+      patchVisible = patchPageSize;
+      renderPatchGroups();
+    });
+  }
+  function fillPatchFilter(id, placeholder, values) {
+    const select = byId(id);
+    const previous = select.value;
+    const options = [...new Set(values)].sort((a, b) => a.localeCompare(b, "vi"));
+    select.replaceChildren(new Option(placeholder, ""),
+      ...options.map(value => new Option(value, value)));
+    select.value = options.includes(previous) ? previous : "";
+  }
+  for (const filter of ["patch-category", "patch-architecture"]) {
+    byId(filter).addEventListener("change", () => {
+      patchVisible = patchPageSize;
+      renderPatchGroups();
+    });
+  }
+  byId("patch-search").addEventListener("input", () => {
+    patchVisible = patchPageSize;
+    renderPatchGroups();
+  });
+  byId("patch-more").addEventListener("click", () => {
+    patchVisible += patchPageSize;
+    renderPatchGroups();
+  });
+
+  byId("security-scan").addEventListener("click", event => {
+    const status = byId("security-scan-state");
+    byId("security-findings").hidden = true;
+    securityRun(event.currentTarget, status, "Đang đối chiếu gói đã cài với Ubuntu USN…", async () => {
+      const {data} = await securityRequest("scan", {});
+      patchGroups = data.package_groups;
+      const packages = [...patchGroups.missing, ...patchGroups.patched];
+      fillPatchFilter("patch-category", "Tất cả loại", packages.map(packageCategoryVi));
+      fillPatchFilter("patch-architecture", "Tất cả kiến trúc",
+        packages.map(item => item.architecture));
+      patchGroup = patchGroups.missing.length ? "missing" : "patched";
+      patchVisible = patchPageSize;
+      byId("patch-search").value = "";
+      renderPatchGroups();
+      byId("security-findings").hidden = false;
+      const caveats = [];
+      if (patchGroups.inconclusive.length) {
+        caveats.push(patchGroups.inconclusive.length + " gói chưa đủ dữ liệu để phân loại");
+      }
+      if (data.inconclusive_definitions) {
+        caveats.push(data.inconclusive_definitions + " quy tắc chưa kết luận");
+      }
+      status.textContent = "Theo dữ liệu Ubuntu USN lúc " + securityTime(data.feed_generated_at) +
+        ". Mốc vá áp dụng trong phạm vi đã quét." +
+        (caveats.length ? " " + caveats.join(" · ") + "." : "");
+    });
+  });
+  patchForm.addEventListener("submit", event => {
+    event.preventDefault();
+    const status = byId("security-verify-state");
+    securityRun(patchForm.querySelector("button"), status, "Đang xác minh phiên bản cài đặt…", async () => {
+      const {data} = await securityRequest("verify-patch", {
+        package: patchForm.elements.package.value.trim(), usn: patchForm.elements.usn.value.trim(),
+      });
+      const compared = data.compared_packages?.[0];
+      status.textContent = securityLabels[data.assessment] + (compared
+        ? " · Đang cài " + compared.installed_version + " · Ngưỡng vá " + compared.fixed_version : "");
+      refreshSecurityHistory();
+    });
+  });
 
   byId("chat-example").addEventListener("click", () => {
     const input = byId("message");

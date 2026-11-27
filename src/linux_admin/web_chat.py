@@ -15,7 +15,8 @@ WEB_TOOLS = {
     "get_system_overview", "get_disk_usage", "list_top_processes",
     "list_all_mounts", "get_io_stats", "get_failed_services", "get_service_status",
     "get_network_state", "list_listening_ports", "inspect_listening_port",
-    "inspect_security_posture", "tavily_web_search",
+    "inspect_security_posture", "check_auth_log", "check_security_updates",
+    "tavily_web_search",
 }
 
 
@@ -98,7 +99,11 @@ def investigate(config, message: str) -> dict:
             "he thong co on khong", "he thong hien tai chay nhu the nao",
             "cho minh biet tinh trang he thong hien tai",
         }
-        planner = RuleBasedPlanner(config) if quick or quick_network else None
+        local_security = RuleBasedPlanner._contains_any(
+            intent, ("ssh", "sshd", "dang nhap", "xac thuc", "brute force",
+                     "ban va", "security updates", "security patch", "usn", "lo hong")
+        )
+        planner = RuleBasedPlanner(config) if quick or quick_network or local_security else None
         agent = Agent(registry, config, audit, planner=planner)
         incident = agent.run(message)
         references = _extract_external_references(incident.evidence)
@@ -134,6 +139,12 @@ def investigate(config, message: str) -> dict:
                     f"{states}. " if states
                     else "Chưa thấy card mạng ngoài loopback. "
                 ) + "Chưa kiểm tra gateway, DNS hay kết nối Internet."
+        elif local_security:
+            answer = next(
+                (line for line in incident.findings if "bản vá" in line
+                 or line.startswith(("check_auth_log:", "check_security_updates:"))),
+                "Xem các kết quả bảo mật đã thu được bên dưới.",
+            )
         elif quick or has_overview:
             answer = describe_health(
                 incident.evidence, config.policy.resource_threshold_percent
@@ -153,7 +164,13 @@ def investigate(config, message: str) -> dict:
             "tools": [
                 {
                     "name": tool.tool_name, "status": tool.status,
-                    "ms": tool.duration_ms, "result": tool.data, "error": tool.error,
+                    "ms": tool.duration_ms,
+                    "result": (
+                        {key: value for key, value in tool.data.items()
+                         if key not in {"recent_failures", "failed_source_ips", "stderr_excerpt"}}
+                        if tool.tool_name == "check_auth_log" else tool.data
+                    ),
+                    "error": tool.error,
                 }
                 for tool in incident.evidence
             ],

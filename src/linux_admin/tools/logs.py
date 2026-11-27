@@ -7,6 +7,7 @@ available (for example, on Windows or a Linux container without systemd).
 
 from __future__ import annotations
 
+import ipaddress
 import platform
 import re
 import shutil
@@ -369,17 +370,11 @@ class AuthLogTool:
         },
     )
 
-    _FAIL_PATTERN = re.compile(
-        r"(Failed password|Invalid user|authentication failure|"
-        r"pam_unix.*authentication failure)",
-        re.IGNORECASE,
+    _SSH_EVENT = re.compile(
+        r"^\S+\s+\S+\s+sshd(?:-session|-auth)?\[\d+\]: "
+        r"(?P<outcome>Failed|Accepted) \S+ for (?:invalid user )?\S+ "
+        r"from (?P<ip>\S+) port \d+\b"
     )
-    _SUCCESS_PATTERN = re.compile(
-        r"(Accepted (password|publickey)|session opened for user)",
-        re.IGNORECASE,
-    )
-    _IP_PATTERN = re.compile(r"from\s+(\d{1,3}(?:\.\d{1,3}){3})")
-    _SUDO_PATTERN = re.compile(r"\bsudo\b", re.IGNORECASE)
 
     def execute(
         self,
@@ -420,6 +415,7 @@ class AuthLogTool:
             self.spec.name,
             "journalctl",
             [
+                "--system",
                 "--unit",
                 "ssh",
                 "--unit",
@@ -430,74 +426,78 @@ class AuthLogTool:
                 f"{since_minutes} minutes ago",
                 "--no-pager",
                 "--output=short-iso",
-                f"--lines={lines}",
+                f"--lines={lines + 1}",
             ],
         )
         if error is not None:
             return error
         assert completed is not None
-        entries = completed.stdout.splitlines()
-        if len(entries) == 1 and entries[0].strip() == "-- No entries --":
-            entries = []
-
-        failed_count = 0
-        success_count = 0
-        sudo_count = 0
-        per_ip: dict[str, int] = {}
+        if completed.stderr.strip():
+            return ToolResult(
+                self.spec.name, "failed",
+                error="Không xác nhận được quyền đọc journal hệ thống đầy đủ.",
+            )
+        entries = [
+            line for line in completed.stdout.splitlines()
+            if line.strip() and line.strip() != "-- No entries --"
+        ]
+        complete = len(entries) <= lines
+        entries = entries[-lines:]
+        failures: dict[str, int] = {}
+        accepted_after_failures: set[str] = set()
         recent_failures: list[str] = []
-
+        success_count = failed_count = sudo_count = 0
         for line in entries:
-            if self._SUDO_PATTERN.search(line):
+            if re.search(r"\bsudo(?:\[\d+\])?: ", line):
                 sudo_count += 1
-            if self._FAIL_PATTERN.search(line):
+            event = self._SSH_EVENT.search(line)
+            if event is None:
+                continue
+            try:
+                ip = str(ipaddress.ip_address(event["ip"]))
+            except ValueError:
+                continue
+            if event["outcome"] == "Failed":
                 failed_count += 1
-                match = self._IP_PATTERN.search(line)
-                if match:
-                    ip = match.group(1)
-                    per_ip[ip] = per_ip.get(ip, 0) + 1
+                failures[ip] = failures.get(ip, 0) + 1
                 recent_failures.append(line[:500])
-            elif self._SUCCESS_PATTERN.search(line):
+            else:
                 success_count += 1
+                if failures.get(ip, 0) >= brute_force_threshold:
+                    accepted_after_failures.add(ip)
 
-        top_ips = sorted(per_ip.items(), key=lambda kv: kv[1], reverse=True)[:10]
-        top_source_ips = [
-            {"ip": ip, "failure_count": count} for ip, count in top_ips
+        counts = [
+            {"ip": ip, "failure_count": count}
+            for ip, count in sorted(failures.items(), key=lambda item: (-item[1], item[0]))
         ]
-        suspicious_ips = [
-            item
-            for item in top_source_ips
-            if item["failure_count"] >= brute_force_threshold
+        suspicious = [
+            {**item, "accepted_after_failures": item["ip"] in accepted_after_failures}
+            for item in counts if item["failure_count"] >= brute_force_threshold
         ]
-
         return ToolResult(
             tool_name=self.spec.name,
             status="success",
             data={
                 "window_minutes": since_minutes,
+                "coverage_complete": complete,
                 "scanned_line_count": len(entries),
                 "failed_login_count": failed_count,
                 "successful_login_count": success_count,
                 "sudo_event_count": sudo_count,
-                "top_source_ips": top_source_ips,
-                "suspicious_ips": suspicious_ips,
-                "brute_force_suspected": bool(suspicious_ips),
+                "top_source_ips": counts[:10],
+                "failed_source_ips": sorted(failures),
+                "suspicious_ips": suspicious,
+                "brute_force_suspected": bool(suspicious),
                 "brute_force_threshold": brute_force_threshold,
                 "recent_failures": recent_failures[-20:],
             },
             evidence=[
-                f"Scanned {len(entries)} auth-related journal line(s).",
-                (
-                    f"Failed logins: {failed_count}; successful: {success_count}; "
-                    f"sudo events: {sudo_count}."
-                ),
-                (
-                    f"Brute-force pattern suspected from {len(suspicious_ips)} "
-                    f"source IP(s) (threshold: {brute_force_threshold})."
-                    if suspicious_ips
-                    else "No source IP exceeded the brute-force threshold."
-                ),
+                f"SSH: {failed_count} failed and {success_count} accepted events.",
+                f"{len(suspicious)} source(s) reached {brute_force_threshold} failures.",
+                "Journal window read." if complete else "Journal window truncated.",
             ],
         )
+
 
 
 def build_tools() -> list[object]:

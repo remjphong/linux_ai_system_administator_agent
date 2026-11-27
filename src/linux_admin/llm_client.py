@@ -609,6 +609,13 @@ class OpenAICompatibleLLMClient:
                     ranking = result["data"].get(key)
                     if isinstance(ranking, list):
                         result["data"][key] = ranking[:3]
+            if item.tool_name == "check_auth_log":
+                result["data"] = {
+                    key: item.data[key] for key in (
+                        "window_minutes", "coverage_complete", "failed_login_count",
+                        "successful_login_count", "brute_force_suspected",
+                    ) if key in item.data
+                }
             safe_evidence.append(_sanitize_for_prompt(result))
         evidence_json = json.dumps(
             safe_evidence, ensure_ascii=False, separators=(",", ":")

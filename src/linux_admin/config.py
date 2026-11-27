@@ -84,6 +84,14 @@ class ServiceSettings:
 
 
 @dataclass(frozen=True)
+class SecuritySettings:
+    monitor_ssh: bool = False
+    interval_seconds: int = 30
+    window_minutes: int = 5
+    failure_threshold: int = 10
+
+
+@dataclass(frozen=True)
 class AppConfig:
     name: str
     version: str
@@ -95,6 +103,7 @@ class AppConfig:
     services: ServiceSettings
     project_root: Path
     config_dir: Path
+    security: SecuritySettings = field(default_factory=SecuritySettings)
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -474,6 +483,22 @@ def load_config(
                 "restart_service must require approval while restart is enabled"
             )
 
+    security = agent_file.get("security", {})
+    if not isinstance(security, dict):
+        raise ConfigurationError("'security' in agent.yaml must be a mapping")
+    security_settings = SecuritySettings(
+        monitor_ssh=_boolean(security.get("monitor_ssh", False), "security.monitor_ssh"),
+        interval_seconds=_integer(
+            security.get("interval_seconds", 30), "security.interval_seconds", 10, 300
+        ),
+        window_minutes=_integer(
+            security.get("window_minutes", 5), "security.window_minutes", 1, 60
+        ),
+        failure_threshold=_integer(
+            security.get("failure_threshold", 10), "security.failure_threshold", 3, 100
+        ),
+    )
+
     return AppConfig(
         name=app_name,
         version=app_version,
@@ -521,4 +546,5 @@ def load_config(
         ),
         project_root=root,
         config_dir=cfg_dir,
+        security=security_settings,
     )

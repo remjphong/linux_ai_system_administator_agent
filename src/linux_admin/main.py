@@ -58,6 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
             "requires policy and approval)"
         ),
     )
+    mode.add_argument("--security-updates", action="store_true",
+                      help="Scan local packages against Ubuntu security notices")
+    mode.add_argument("--verify-security-update", nargs=2, metavar=("PACKAGE", "USN"),
+                      help="Verify one installed package against a specific Ubuntu notice")
     parser.add_argument(
         "--config-dir",
         metavar="DIR",
@@ -456,6 +460,8 @@ def main() -> int:
             args.list_tools,
             args.investigate,
             args.restart_service,
+            args.security_updates,
+            args.verify_security_update,
         ))
         if explicit_mode:
             parser.error(
@@ -471,6 +477,8 @@ def main() -> int:
         or args.list_tools
         or args.investigate
         or args.restart_service
+        or args.security_updates
+        or args.verify_security_update
     ):
         parser.print_help()
         return 0
@@ -517,6 +525,28 @@ def main() -> int:
     try:
         if config.audit.enabled:
             audit_logger = AuditLogger(config.audit.database_path)
+
+        if args.security_updates or args.verify_security_update:
+            from linux_admin.tools.security_updates import (
+                SecurityUpdatesTool,
+                verify_security_update,
+            )
+
+            tool = SecurityUpdatesTool(config.project_root)
+            if args.verify_security_update:
+                if audit_logger is None:
+                    print("Cần bật audit để hậu kiểm bản vá.", file=sys.stderr)
+                    return 2
+                package, usn = args.verify_security_update
+                try:
+                    result = verify_security_update(tool, package, usn, audit_logger)
+                except AuditError:
+                    print("Không ghi được audit cho hậu kiểm bản vá.", file=sys.stderr)
+                    return 2
+            else:
+                result = tool.execute()
+            print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+            return 0 if result.data.get("assessment") in {"clear", "patched"} else 1
 
         if args.investigate:
             legacy_text = (

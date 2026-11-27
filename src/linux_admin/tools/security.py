@@ -8,6 +8,8 @@ from typing import Any
 
 from linux_admin.config import AppConfig
 from linux_admin.contracts import ToolResult, ToolSpec
+from linux_admin.tools.logs import AuthLogTool
+from linux_admin.tools.security_updates import SecurityUpdatesTool
 
 
 def _is_elevated() -> bool | None:
@@ -78,6 +80,12 @@ class InspectSecurityPostureTool:
         else:
             add("llm_boundary", "pass", "LLM integration is disabled; rule-based operation remains available.")
 
+        auth = AuthLogTool().execute(lines=1, since_minutes=1)
+        if auth.ok:
+            add("ssh_journal", "pass", "Journal đọc được trong tiến trình hiện tại.")
+        else:
+            add("ssh_journal", "unknown", auth.error or "Không đọc được log SSH.")
+
         statuses = [item["status"] for item in checks]
         overall = "fail" if "fail" in statuses else "warning" if "warning" in statuses or "unknown" in statuses else "pass"
         return ToolResult(
@@ -89,4 +97,4 @@ class InspectSecurityPostureTool:
 
 
 def build_tools(config: AppConfig) -> list[object]:
-    return [InspectSecurityPostureTool(config)]
+    return [InspectSecurityPostureTool(config), SecurityUpdatesTool(config.project_root)]

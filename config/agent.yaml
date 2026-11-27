@@ -37,3 +37,9 @@ tavily:
 audit:
   enabled: true
   database_path: data/audit.db
+
+security:
+  monitor_ssh: true  # Enable to include SSH in dashboard --monitor.
+  interval_seconds: 30
+  window_minutes: 5
+  failure_threshold: 10

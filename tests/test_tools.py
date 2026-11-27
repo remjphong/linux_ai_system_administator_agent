@@ -1006,3 +1006,27 @@ def test_u01_negative_counter_delta_is_not_reported(monkeypatch):
     assert result.data["process_io_stats"] == []
     assert result.data["device_count"] == 0
     assert result.data["io_wait_percent"] is not None
+
+
+def test_auth_log_counts_distinct_ssh_events_and_detects_incomplete_sample(monkeypatch):
+    from linux_admin.tools import logs
+
+    base = "2026-11-18T09:00:00 host sshd[1]: "
+    lines = [
+        base + "Invalid user alice from 2001:db8::1 port 2345",
+        base + "pam_unix(sshd:auth): authentication failure",
+        *[base + "Failed password for invalid user alice from 2001:0db8::1 port 2345"] * 3,
+        base + "Accepted publickey for alice from 2001:db8::1 port 2346",
+    ]
+    fixture = SimpleNamespace(stdout="\n".join(lines), stderr="")
+    monkeypatch.setattr(logs, "_run_linux_command", lambda *args: (fixture, None))
+    data = AuthLogTool().execute(lines=6, brute_force_threshold=3).data
+    assert data["failed_login_count"] == 3
+    assert data["successful_login_count"] == 1
+    assert data["suspicious_ips"] == [
+        {"ip": "2001:db8::1", "failure_count": 3, "accepted_after_failures": True}
+    ]
+    assert data["coverage_complete"] is True
+    assert AuthLogTool().execute(lines=5).data["coverage_complete"] is False
+    fixture.stderr = "You are currently not seeing messages from other users."
+    assert AuthLogTool().execute().ok is False
