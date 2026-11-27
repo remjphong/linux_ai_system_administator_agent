@@ -2,6 +2,10 @@
 
 Giám sát máy Linux, điều tra sự cố và xác minh khắc phục. Dashboard cập nhật CPU, RAM, swap, đĩa và tiến trình. Để kiểm thử bản web mới nhất, dùng nhánh `main` trên Ubuntu với Python 3.10+. Dashboard và mô phỏng sự cố chạy được khi chưa có API key.
 
+## Video demo
+
+![Video demo dashboard Linux Admin Agent](docs/dashboard-demo.webp)
+
 ## 1. Cài đặt
 
 **Clone lần đầu**
